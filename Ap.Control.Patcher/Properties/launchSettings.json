@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "Ap.Control.Patcher": {
+      "commandName": "Project",
+      "commandLineArgs": "apply all"
+    }
+  }
+}

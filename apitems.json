@@ -1,0 +1,32 @@
+{
+  "_comment": "Maps Archipelago ItemInfo.ItemId -> in-game action. Auto-loaded from the app dir; override with --items <path>. See apitems.sample.json for the full format.",
+
+  "_comment_sectors": "The AP world's three sector items are real 0x49-tagged sector GIDs, but a sector is not a grantable inventory entity. Each drives two things: a \"bit\" (what the elevator panel offers) and a GameFlow \"flag\" (whether the game permits the trip once a floor is chosen). Executive is deliberately absent — the game forces it available and the UI patch leaves it always-enabled, since locking the player out of the hub risks a softlock. Investigation is already gated by the patch but has no AP item until the DLC.",
+
+  "_comment_maintenance": "Maintenance Sector drives BOTH maintenance entries. Lobby and Pump Room (the 'Maintenance Access Corridor') reach the same content, so gating only Lobby would leave a permanent back door.",
+
+  "_comment_bits": "\"bits\" REQUIRE the UI patch (tools/Ap.Control.Patcher, `apply elevator`) — without it they are written but nothing reads them. Stock, the panel derives its floor list from ONE integer = the highest unlocked sector index, which makes the sectors a strict ladder (Maintenance implies Research) and hardcodes Pump Room and Executive as always available. Patched, it reads five independent booleans the client writes into a Coherent UI model. Those same bytes are the control-point 'new' badge flags, so the game overwrites them for its own reasons — hence ArchipelagoClient re-asserts them on a 100 ms timer, and reconciles the GameFlow flags on a 1 s timer rather than only on save.",
+
+  "_comment_clearance": "Clearance needs no entry: the world mints its ids as (n << 8) | 0x49 -- 329/585/841/1097/1353/1609 for fixed Levels 1-6, 1865 for Progressive Clearance Level -- and the client resolves both from the id (Utils/ApClearanceIds.cs).",
+
+  "items": {
+    "3689552543633932361": {
+      "kind": "Flag",
+      "flags": [
+        "ExecutiveElevator_CanTravel_Maintenance_Lobby",
+        "ExecutiveElevator_CanTravel_Maintenance_Pump_Room"
+      ],
+      "bits": ["MaintenanceLobby", "MaintenancePumpRoom"]
+    },
+    "3367729802766991433": {
+      "kind": "Flag",
+      "flags": ["ExecutiveElevator_CanTravel_Research"],
+      "bits": ["Research"]
+    },
+    "4309018790484475977": {
+      "kind": "Flag",
+      "flags": ["ExecutiveElevator_CanTravel_Containment"],
+      "bits": ["Containment"]
+    }
+  }
+}

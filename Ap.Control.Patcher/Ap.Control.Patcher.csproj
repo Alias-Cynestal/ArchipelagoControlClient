@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- Windows-specific: it patches a Windows game install and reads Steam's registry keys to find
+         it. net10.0-windows gets the registry APIs in-box rather than via a package reference. -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Ap.Control.Patcher</AssemblyName>
+    <RootNamespace>Ap.Control.Patcher</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <!-- `dotnet publish -c Release` produces ONE .exe the player can drop next to the client and run.
+
+       Framework-dependent on purpose: the AP client already requires the .NET runtime, so this asks
+       nothing new of the player and keeps the download at ~1 MB rather than ~70 MB. For players with
+       no .NET installed, `dotnet publish -c Release -p:SelfContained=true` folds the runtime in.
+
+       Both of those need the .NET runtime packs from NuGet, which the user-level packageSourceMapping
+       allow-list blocks — see the repo-root nuget.config, which exists to let them through. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Keeps the single file to just the .exe instead of shedding a .pdb beside it. -->
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+</Project>
