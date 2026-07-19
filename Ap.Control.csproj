@@ -9,8 +9,11 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="Ap.Control.Patcher\**" />
     <Compile Remove="tools\**" />
+    <EmbeddedResource Remove="Ap.Control.Patcher\**" />
     <EmbeddedResource Remove="tools\**" />
+    <None Remove="Ap.Control.Patcher\**" />
     <None Remove="tools\**" />
   </ItemGroup>
 

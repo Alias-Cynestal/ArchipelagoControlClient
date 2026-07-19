@@ -10,6 +10,7 @@
     <AssemblyName>Ap.Control.Patcher</AssemblyName>
     <RootNamespace>Ap.Control.Patcher</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
+	<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
   </PropertyGroup>
 
   <!-- `dotnet publish -c Release` produces ONE .exe the player can drop next to the client and run.
