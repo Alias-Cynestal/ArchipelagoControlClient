@@ -5,7 +5,36 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-	<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
+    <!-- The RID lives here rather than on the CI command line on purpose. A self-contained publish
+         infers a RID even when none is given, and a RID-specific restore REWRITES packages.lock.json
+         to add a "net10.0/win-x64" target. A later restore in locked mode that evaluates without a
+         RID then sees a lock file it disagrees with and fails NU1004. Making it a project property
+         means every restore, build and publish (local, CI, Debug, Release) evaluates the same RID,
+         so the lock file stays valid. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Players should not have to install the .NET runtime to run the client. -->
+    <SelfContained>true</SelfContained>
+
+    <!-- Publish as ONE file. IncludeNativeLibrariesForSelfExtract matters here: without it a
+         self-contained single-file build still drops its native runtime DLLs (coreclr, hostfxr, the
+         System.*.Native set) beside the exe, so the output is a folder again rather than one file.
+         Compression roughly halves the result, at the cost of a slightly slower first start.
+
+         UNCONDITIONAL for the same reason as RuntimeIdentifier above: a self-contained single-file
+         build pulls in an implicit Microsoft.NET.ILLink.Tasks reference, so making these Release-only
+         changes the restore graph between Debug and Release and breaks locked-mode restore (NU1004).
+         They only take effect at publish time, so applying them in Debug costs nothing. -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- Keeps the drop to just the .exe instead of shedding a .pdb beside it. Safe to leave
+         Release-only: DebugType does not affect the restore graph. -->
+    <DebugType>none</DebugType>
   </PropertyGroup>
 
   <ItemGroup>
@@ -18,10 +47,18 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The item map is read from AppContext.BaseDirectory at startup, so it has to reach the output
-         dir. PreserveNewest rather than Always so a map edited in place next to the exe isn't
-         clobbered by a rebuild. -->
-    <None Update="apitems.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The item map is read from AppContext.BaseDirectory at startup, so it has to reach the build
+         output dir. PreserveNewest rather than Always so a map edited in place next to the exe isn't
+         clobbered by a rebuild.
+
+         CopyToPublishDirectory="Never" keeps it OUT of the published drop: publish ships one exe, and
+         the map comes from the embedded copy below. A player who wants to edit the table can still
+         drop an apitems.json next to the exe (or pass the items option) and it takes precedence. -->
+    <None Update="apitems.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+
+    <!-- LogicalName pins the resource name so the lookup in Program.cs cannot break on a namespace
+         change. -->
+    <EmbeddedResource Include="apitems.json" LogicalName="apitems.json" />
   </ItemGroup>
 
   <ItemGroup>

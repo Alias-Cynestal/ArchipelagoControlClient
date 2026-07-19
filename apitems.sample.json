@@ -1,5 +1,5 @@
 {
-  "_comment": "Maps Archipelago ItemInfo.ItemId -> in-game action. Copy to apitems.json (auto-loaded from the app dir) or pass with --items <path>. kind = Inventory | Flag | Clearance | ProgressiveClearance | Ability. Ids may be decimal or a 0x-prefixed GID. Ability keys: see NativeAbilityController.Abilities (levitate, launch, shield, slam, evade, seize). NOTE: the live ability grant is inert — ability availability is a runtime flow pin that is never serialized, so it is not reachable from content data; the mapping is wired end-to-end and takes effect if that is ever solved. Every key inside \"items\" must be a numeric id, so keep notes at the top level like these.",
+  "_comment": "Maps Archipelago ItemInfo.ItemId -> in-game action. Copy to apitems.json (auto-loaded from the app dir) or pass with --items <path>. kind = Inventory | Flag | Clearance | ProgressiveClearance. Ids may be decimal or a 0x-prefixed GID. Every key inside \"items\" must be a numeric id, so keep notes at the top level like these. NOTE: the single-file client embeds its own copy of apitems.json; a file placed next to the exe (or passed with --items) overrides it.",
 
   "_comment_flags": "A Flag entry takes either \"flag\": \"Name\" for the common single case, or \"flags\": [\"A\",\"B\"] when one AP item owns several. Every listed flag is granted together and reconciled together. The client relocks any mapped flag Archipelago has not granted, and re-applies the ones it has, on a timer — the game writes these variables itself (a shipped content script sets a whole group of sector flags true), so enforcement has to be continuous rather than one-shot.",
 
@@ -39,8 +39,6 @@
 
     "1200": { "kind": "Flag", "flag": "KEY7" },
 
-    "2001": { "kind": "Inventory", "gid": "0x3AE684B975D8804D" },
-
-    "3001": { "kind": "Ability", "ability": "levitate" }
+    "2001": { "kind": "Inventory", "gid": "0x3AE684B975D8804D" }
   }
 }

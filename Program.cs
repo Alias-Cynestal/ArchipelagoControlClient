@@ -30,11 +30,30 @@ static async Task<int> RunClientAsync(string[] args)
     ApItemMap itemMap;
     try
     {
+        // A file beside the exe (or --items) wins, so a player can still edit the table; otherwise fall
+        // back to the copy embedded at build time, which is what lets the single-file build ship as
+        // one actual file instead of an exe plus a loose JSON its behaviour depends on.
         string mapPath = itemsPath ?? Path.Combine(AppContext.BaseDirectory, "apitems.json");
-        itemMap = File.Exists(mapPath) ? ApItemMap.Load(mapPath) : ApItemMap.Empty;
+        string mapSource;
+        if (File.Exists(mapPath))
+        {
+            itemMap = ApItemMap.Load(mapPath);
+            mapSource = mapPath;
+        }
+        else if (EmbeddedItemMap() is { } embedded)
+        {
+            itemMap = ApItemMap.Parse(embedded);
+            mapSource = "built-in copy";
+        }
+        else
+        {
+            itemMap = ApItemMap.Empty;
+            mapSource = "none";
+        }
+
         Console.WriteLine(itemMap.IsEmpty
             ? "Item map: none — clearance items still resolve (built in); everything else falls back to inventory GID (pass --items <path> to route sectors/keys)."
-            : $"Item map: {itemMap.Count} entries loaded from {mapPath} (clearance items resolve built-in).");
+            : $"Item map: {itemMap.Count} entries loaded from {mapSource} (clearance items resolve built-in).");
     }
     catch (Exception e)
     {
@@ -75,4 +94,17 @@ static async Task<int> RunClientAsync(string[] args)
         catch (OperationCanceledException) { /* Ctrl+C */ }
     }
     return 0;
+}
+
+/// <summary>
+/// The apitems.json embedded at build time, or null if this build has none. Named explicitly via
+/// LogicalName in the .csproj so the lookup does not depend on the root namespace.
+/// </summary>
+static string? EmbeddedItemMap()
+{
+    using Stream? s = System.Reflection.Assembly.GetExecutingAssembly()
+        .GetManifestResourceStream("apitems.json");
+    if (s is null) return null;
+    using var reader = new StreamReader(s);
+    return reader.ReadToEnd();
 }

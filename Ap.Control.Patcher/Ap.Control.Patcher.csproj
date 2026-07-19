@@ -10,22 +10,35 @@
     <AssemblyName>Ap.Control.Patcher</AssemblyName>
     <RootNamespace>Ap.Control.Patcher</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
-	<RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+
+    <!-- RID and SelfContained are UNCONDITIONAL, not Release-only. Both affect the restore graph, and
+         a plain `dotnet restore` evaluates Debug: if they only applied to Release, restore would write
+         a lock file with no RID and a Release publish would then disagree with it (NU1004 in locked
+         mode). Keep them out of any Configuration condition. -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <!-- Self-contained to match the client. The client now bundles the runtime, so a player may have
+         no .NET installed at all — a framework-dependent patcher would fail to start for exactly the
+         players the self-contained client exists to serve. -->
+    <SelfContained>true</SelfContained>
+
+    <!-- Publish as one file. Unconditional, not Release-only: a self-contained single-file build adds
+         an implicit Microsoft.NET.ILLink.Tasks reference, so gating these on Configuration makes the
+         Debug and Release restore graphs differ and breaks locked-mode restore (NU1004). -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
   </PropertyGroup>
 
   <!-- `dotnet publish -c Release` produces ONE .exe the player can drop next to the client and run.
+       Bundling the runtime makes it ~70 MB rather than ~215 KB, which is the price of not requiring
+       a .NET install.
 
-       Framework-dependent on purpose: the AP client already requires the .NET runtime, so this asks
-       nothing new of the player and keeps the download at ~1 MB rather than ~70 MB. For players with
-       no .NET installed, `dotnet publish -c Release -p:SelfContained=true` folds the runtime in.
-
-       Both of those need the .NET runtime packs from NuGet, which the user-level packageSourceMapping
-       allow-list blocks — see the repo-root nuget.config, which exists to let them through. -->
+       The runtime packs this pulls from NuGet are blocked by the user-level packageSourceMapping
+       allow-list — see the repo-root nuget.config, which exists to let them through. -->
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
-    <PublishSingleFile>true</PublishSingleFile>
-    <SelfContained>false</SelfContained>
-    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <!-- Keeps the single file to just the .exe instead of shedding a .pdb beside it. -->
+    <!-- Keeps the single file to just the .exe instead of shedding a .pdb beside it. Safe to leave
+         Release-only: DebugType does not affect the restore graph. -->
     <DebugType>none</DebugType>
   </PropertyGroup>
 

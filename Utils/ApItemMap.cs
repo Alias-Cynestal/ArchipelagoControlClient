@@ -65,10 +65,17 @@ namespace Ap.Control.Utils
             return false;
         }
 
-        /// <summary>Load a map from JSON. Throws on malformed files so a bad table fails fast at startup.</summary>
-        public static ApItemMap Load(string path)
+        /// <summary>Load a map from a JSON file. Throws on malformed files so a bad table fails fast at startup.</summary>
+        public static ApItemMap Load(string path) => Parse(File.ReadAllText(path));
+
+        /// <summary>
+        /// Parse a map from JSON text. Split out from <see cref="Load"/> so the same table can come
+        /// from the copy embedded in the executable, which is what makes a single-file build usable
+        /// without shipping a loose apitems.json beside it.
+        /// </summary>
+        public static ApItemMap Parse(string json)
         {
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            using var doc = JsonDocument.Parse(json);
             var byId = new Dictionary<long, ApItemAction>();
 
             if (!doc.RootElement.TryGetProperty("items", out var items))
