@@ -16,6 +16,8 @@ namespace Ap.Control
         /// </summary>
         private const int ReconcileIntervalMs = 1000;
 
+        private const long TakeControlGid = 371954468016324688; // GID for the "Take Control" item, which is a prerequisite for any other inventory grant.
+
         /// <summary>
         /// Enforcement must not start until the server has replayed the item list.
         /// </summary>
@@ -111,6 +113,10 @@ namespace Ap.Control
                 {
                     Console.WriteLine($"Completing mission completed check for location {_session.Locations.GetLocationNameFromId((long)mission.GidMissionId)}");
                     _session.Locations.CompleteLocationChecks((long)mission.GidMissionId);
+                    if (mission.GidMissionId == TakeControlGid)
+                    {
+                        _session.SetGoalAchieved();
+                    }
                 }
             }
 
