@@ -24,15 +24,13 @@ static async Task<int> RunClientAsync(string[] args)
     string? itemsPath = args.SkipWhile(a => a != "--items").Skip(1).FirstOrDefault();
     var model = new ArchipelagoConnectionModel(new Uri(server), username, password);
     await using var granter = new NativeItemGranter();
+    await using var abilityGranter = new NativeAbilityGranter();
     using var gameflow = new NativeGameFlowController();
     using var uiModel = new NativeUiModelController();
 
     ApItemMap itemMap;
     try
     {
-        // A file beside the exe (or --items) wins, so a player can still edit the table; otherwise fall
-        // back to the copy embedded at build time, which is what lets the single-file build ship as
-        // one actual file instead of an exe plus a loose JSON its behaviour depends on.
         string mapPath = itemsPath ?? Path.Combine(AppContext.BaseDirectory, "apitems.json");
         string mapSource;
         if (File.Exists(mapPath))
@@ -61,7 +59,7 @@ static async Task<int> RunClientAsync(string[] args)
         return 1;
     }
 
-    using var client = new ArchipelagoClient(model, granter, gameflow, uiModel, itemMap);
+    using var client = new ArchipelagoClient(model, granter, abilityGranter, gameflow, uiModel, itemMap);
     try
     {
         await client.StartClient();

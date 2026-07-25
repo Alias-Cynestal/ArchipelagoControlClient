@@ -4,14 +4,6 @@ namespace Ap.Control.Patcher
 {
     /// <summary>
     /// Applies the Ap.Control UI patches to a Control install.
-    ///
-    /// Every patch is length-neutral and written in place inside the .rmdp, so neither the .bin index
-    /// nor the .packmeta is ever touched — they both store per-file sizes, and a game that finds them
-    /// disagreeing refuses to launch. The untouched original of each patched blob is kept under
-    /// LocalAppData so `restore` puts back the exact bytes.
-    ///
-    /// Steam's "verify integrity of game files" and any game update revert these patches; `status`
-    /// detects that.
     /// </summary>
     internal static class Program
     {
@@ -216,9 +208,7 @@ namespace Ap.Control.Patcher
         private static bool GameIsRunning() => Process.GetProcessesByName(GameProcess).Length > 0;
 
         /// <summary>
-        /// Splits argv into positionals and options. Options that take a value consume the next
-        /// argument, so a path like <c>--game D:\Games\Control</c> is never mistaken for the positional
-        /// patch name — which is exactly what a naive "first argument not starting with -" scan does.
+        /// Splits argv into positionals and options.
         /// </summary>
         private sealed record CommandLine(List<string> Positionals, Dictionary<string, string?> Options)
         {
@@ -269,6 +259,7 @@ namespace Ap.Control.Patcher
                 PATCH
                   elevator  Gate each elevator sector destination independently
                   shop      Remove weapon-form unlocks from the control-point shop
+                  abilities Lock every not-yet-owned node in the Abilities menu
                   all       Every patch (default)
 
                 OPTIONS

@@ -1,6 +1,10 @@
 {
   "profiles": {
-    "Ap.Control.Patcher": {
+    "Revert all": {
+      "commandName": "Project",
+      "commandLineArgs": "restore abilities"
+    },
+    "Apply all": {
       "commandName": "Project",
       "commandLineArgs": "apply all"
     }

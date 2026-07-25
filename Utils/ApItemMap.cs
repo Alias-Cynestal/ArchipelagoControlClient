@@ -13,6 +13,7 @@ namespace Ap.Control.Utils
     ///     "1001": { "kind": "Inventory",  "gid": "0x3AE684B975D8804D" },
     ///     "1002": { "kind": "Flag",       "flag": "ExecutiveElevator_CanTravel_Research" },
     ///     "1003": { "kind": "Clearance",  "level": 3 },
+    ///     "1004": { "kind": "Ability",    "gid": "0x205A101A3321C04D" },
     ///     "1005": { "kind": "ProgressiveClearance" }
     ///   }
     /// }
@@ -30,6 +31,9 @@ namespace Ap.Control.Utils
         /// Every distinct GameFlow flag name the map controls (all Flag-kind entries)
         /// </summary>
         public IReadOnlyCollection<string> FlagNames => _flagNames;
+
+        /// <summary>Every item id the map has an explicit entry for.</summary>
+        public IReadOnlyCollection<long> Ids => _byId.Keys;
 
         private ApItemMap(Dictionary<long, ApItemAction> byId)
         {
@@ -69,9 +73,7 @@ namespace Ap.Control.Utils
         public static ApItemMap Load(string path) => Parse(File.ReadAllText(path));
 
         /// <summary>
-        /// Parse a map from JSON text. Split out from <see cref="Load"/> so the same table can come
-        /// from the copy embedded in the executable, which is what makes a single-file build usable
-        /// without shipping a loose apitems.json beside it.
+        /// Parse the item map from JSON text.
         /// </summary>
         public static ApItemMap Parse(string json)
         {
@@ -96,9 +98,11 @@ namespace Ap.Control.Utils
                 byId[id] = kind switch
                 {
                     ApActionKind.Inventory => ApItemAction.ForInventory(ParseGid(e, id)),
+                    ApActionKind.Ability => ApItemAction.ForAbility(ParseGid(e, id)),
                     ApActionKind.Flag => ApItemAction.ForFlags(ParseFlags(e, id), ParseBits(e, id)),
                     ApActionKind.Clearance => ApItemAction.ForClearance(e.GetProperty("level").GetInt32()),
                     ApActionKind.ProgressiveClearance => ApItemAction.ProgressiveClearance,
+                    ApActionKind.ProgressiveMilestone => ApItemAction.ProgressiveMilestone,
                     _ => throw new FormatException($"item map: item {id} unsupported kind."),
                 };
             }
@@ -178,7 +182,7 @@ namespace Ap.Control.Utils
         private static ulong ParseGid(JsonElement e, long id)
         {
             if (!e.TryGetProperty("gid", out var g))
-                throw new FormatException($"item map: item {id} (Inventory) has no \"gid\".");
+                throw new FormatException($"item map: item {id} has no \"gid\".");
             // Accept "0x..." hex strings or a JSON number.
             if (g.ValueKind == JsonValueKind.String)
             {
