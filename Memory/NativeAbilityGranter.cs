@@ -7,6 +7,19 @@ namespace Ap.Control.Memory
 {
     /// <summary>
     /// Grants ability-tree upgrades on the game's own main thread.
+    ///
+    /// The ability apply/enumerate functions fire live flow-graph pins, which are only valid on the
+    /// main thread at a clean frame boundary — calling them from a foreign thread (CreateRemoteThread)
+    /// crashes the game, and suspending the other threads doesn't help (the code still isn't running
+    /// in the main thread's flow context). So instead this installs a small detour on the per-frame
+    /// pump <c>coregame::DynamicEntitySpawner::update</c> and uses it as a main-thread RPC executor:
+    /// each frame the hook checks a shared control block and, if a request is pending, calls
+    /// <c>fn(rcx,rdx,r8,r9)</c> and stores the return — on the real main thread. The C# side drives the
+    /// whole grant sequence as a series of these one-call-per-frame requests.
+    ///
+    /// PHASE 1 (this version): the hook mechanism + a non-mutating probe (enumerate the live upgrade
+    /// instances and resolve each to its definition GID). The mutating grant path is not enabled yet.
+    /// See Memory/ability-upgrade-menu findings for the full trace.
     /// </summary>
     public sealed class NativeAbilityGranter : IAbilityGranter
     {
@@ -22,7 +35,9 @@ namespace Ap.Control.Memory
         private const long RVA_FLOWCONNMGR_HOLDER  = 0xda1058; // *(*(holder)) = FlowConnectionManager singleton
         private const long RVA_SAVEGAME_THUNK      = 0xd9c438; // coregame::GameHelper::saveGame(NetworkRole,0,0) — *(thunk) is the fn
 
-        // Ability-point milestone rewards (weapon slot / 2 mod slots).
+        // Ability-point milestone rewards (weapon slot / 2 mod slots). Gated on the spent-points high-
+        // water mark mgr+0x50 vs three runtime thresholds; the reward is applied by firing the milestone
+        // output pin mgr+0x120 with the generic pin-fire FUN_14006a030(FlowConnMgr, pin).
         private const int  MGR_OFF_SPENT_HIGHWATER = 0x50;    // int; compared against the milestone thresholds
         private const int  MGR_OFF_MILESTONE_PIN   = 0x120;   // milestone reward output-pin handle
         private const long RVA_FIRE_PIN            = 0x6a030; // FUN_14006a030(FlowConnMgr, pin) — direct, fires an output pin
@@ -63,6 +78,8 @@ namespace Ap.Control.Memory
         private const int CB_HEARTBEAT = 0x38; // incremented by the hook on every pump tick (liveness)
         private const int CB_GID     = 0x40;  // scratch: 8-byte GID in
         private const int CB_ARCH    = 0x50;  // scratch: 24-byte GlobalIDPointer out
+        private const int CB_VEC     = 0x70;  // scratch: 24-byte ScratchPad vector out
+        private const int CB_SIZE    = 0x100;
 
         private const long PUMP_STOLEN = 0x0F; // bytes of prologue relocated into the trampoline
 
@@ -76,9 +93,12 @@ namespace Ap.Control.Memory
         private readonly object _rpcLock = new();
         private IntPtr _ctrl;         // control block (RW)
         private IntPtr _codePage;     // hook + trampoline + self-test stub (RX)
+        private long   _selfTestStub; // absolute address of a trivial "mov eax,0xC0FFEE; ret" stub
         private long   _pumpEntry;    // absolute address of the patched pump entry
         private byte[]? _origPumpBytes;
         private bool   _hookInstalled;
+
+        private const uint SelfTestMagic = 0x00C0FFEE;
 
         public bool IsReady => _hookInstalled;
 
@@ -116,25 +136,18 @@ namespace Ap.Control.Memory
             return _hProc != IntPtr.Zero;
         }
 
+        // ===========================================================================================
+        //  Phase-1 probe: enumerate live upgrade instances and resolve each to its definition GID.
+        //  All read-only — no flow-pin firing, no point/inventory mutation.
+        // ===========================================================================================
 
         /// <summary>One resolved live ability-upgrade node: its runtime instance GID and definition GID.</summary>
         public readonly record struct LiveUpgrade(ulong InstanceGid, ulong DefinitionGid);
 
         /// <summary>
-        /// Installs the pump hook if needed, then enumerates every live ability-upgrade runtime
-        /// instance and resolves each to its definition (archetype) GID.
-        /// </summary>
-        public Task<IReadOnlyList<LiveUpgrade>> ProbeLiveUpgradesAsync(CancellationToken cancellationToken = default)
-            => Task.Run<IReadOnlyList<LiveUpgrade>>(() => ProbeLiveUpgrades(), cancellationToken);
-
-        private IReadOnlyList<LiveUpgrade> ProbeLiveUpgrades()
-        {
-            if (!EnsureStarted()) throw new InvalidOperationException("granter not started — is Control_DX12 running?");
-            return ScanAbilityUpgradeInstances(verbose: true);
-        }
-
-        /// <summary>
-        /// Walk the GameObjectManager entity table(s) and collect every live entity whose archetype is a type-77 ability_upgrades definition
+        /// Menu-free enumeration: walk the GameObjectManager entity table(s) and collect every live
+        /// entity whose archetype is a type-77 <c>ability_upgrades\*</c> definition, pairing each
+        /// instance GID with its definition GID. Pure reads — no game calls, no pump, nothing mutated.
         /// </summary>
         private List<LiveUpgrade> ScanAbilityUpgradeInstances(bool verbose)
         {
@@ -201,7 +214,11 @@ namespace Ap.Control.Memory
             => Task.Run(() => GrantAbility(definitionGid, verbose: false), cancellationToken);
 
         /// <summary>
-        /// Grant one ability upgrade by its definition GID
+        /// Grant one ability upgrade by its definition GID: find its live instance(s) in the entity
+        /// table, then fire the ability-tree apply pin on the game's main thread (via the pump hook) —
+        /// the point-cost-free path that <c>ApplyUpgrade</c> uses internally. Tries each replica until
+        /// one reports success, then saves. Returns rejected if no live instance exists for the def
+        /// (not currently spawned) or none of the replicas accepted.
         /// </summary>
         public GrantResult GrantAbility(ulong definitionGid, bool verbose)
         {
@@ -227,6 +244,8 @@ namespace Ap.Control.Memory
 
             try
             {
+                EnsureHookInstalled();
+
                 long container = (long)ReadChecked(_imageBase.ToInt64() + RVA_MGR_SLOT, "mgr container (exe+0x1239360)");
                 long mgr = container == 0 ? 0 : (long)ReadPtr(container + MGR_OFF_INSTANCE);
                 if (mgr == 0) return GrantResult.Fail("ability-tree manager not resolved — is a save loaded?");
@@ -262,7 +281,12 @@ namespace Ap.Control.Memory
             => Task.Run(() => GrantMilestone(level, verbose: false), cancellationToken);
 
         /// <summary>
-        /// Grant the ability-point milestone rewards up to <paramref name="level"/>
+        /// Grant the ability-point milestone rewards up to <paramref name="level"/> (1 = weapon slot,
+        /// 2 = +first mod slot, 3 = +second mod slot). Milestones are cumulative — a single spent-points
+        /// high-water counter (mgr+0x50) crossing runtime thresholds — so this raises that counter to the
+        /// level's threshold and fires the milestone reward pin (mgr+0x120) on the main thread, which
+        /// grants every perk unlocked at that level. Intended to be driven progressively: the Nth
+        /// progressive-milestone AP item received calls this with level N.
         /// </summary>
         public GrantResult GrantMilestone(int level, bool verbose)
         {
@@ -272,6 +296,8 @@ namespace Ap.Control.Memory
 
             try
             {
+                EnsureHookInstalled();
+
                 long container = (long)ReadChecked(_imageBase.ToInt64() + RVA_MGR_SLOT, "mgr container (exe+0x1239360)");
                 long mgr = container == 0 ? 0 : (long)ReadPtr(container + MGR_OFF_INSTANCE);
                 if (mgr == 0) return GrantResult.Fail("ability-tree manager not resolved — is a save loaded?");
@@ -285,6 +311,9 @@ namespace Ap.Control.Memory
                     return GrantResult.Fail(
                         $"milestone threshold for level {level} reads {threshold} — not loaded yet (in active gameplay?)");
 
+                // Raise the spent-points high-water mark to the threshold (never lower it), so the reward
+                // pin's flow node sees the milestone as reached. Points AVAILABLE (mgr+0x48) is untouched,
+                // so this does not hand the player anything to spend.
                 int current = MemoryHelper.ReadI32(_hProc, (IntPtr)(mgr + MGR_OFF_SPENT_HIGHWATER));
                 if (current < threshold)
                     MemoryHelper.WriteI32(_hProc, (IntPtr)(mgr + MGR_OFF_SPENT_HIGHWATER), threshold);
@@ -310,6 +339,10 @@ namespace Ap.Control.Memory
             if (saveFn != 0) { try { MainThreadCall(saveFn, role, 0, 0, 0); } catch { /* change already applied */ } }
         }
 
+        // ===========================================================================================
+        //  Main-thread RPC: write a request into the control block, let the pump hook run it, wait.
+        // ===========================================================================================
+
         private ulong MainThreadCall(long fn, long a0, long a1, long a2, long a3, int timeoutMs = 5000)
         {
             lock (_rpcLock)
@@ -321,6 +354,7 @@ namespace Ap.Control.Memory
                 MemoryHelper.WriteBytes(_hProc, (IntPtr)(c + CB_A2), BitConverter.GetBytes(a2));
                 MemoryHelper.WriteBytes(_hProc, (IntPtr)(c + CB_A3), BitConverter.GetBytes(a3));
                 MemoryHelper.WriteBytes(_hProc, (IntPtr)(c + CB_RESULT), BitConverter.GetBytes(0L));
+                // Publish the request last, after every arg is already in memory (x86 store order holds).
                 ulong beatStart = MemoryHelper.ReadU64(_hProc, (IntPtr)(c + CB_HEARTBEAT));
                 MemoryHelper.WriteBytes(_hProc, (IntPtr)(c + CB_PENDING), BitConverter.GetBytes(1L));
 
@@ -351,6 +385,64 @@ namespace Ap.Control.Memory
             }
         }
 
+        // ===========================================================================================
+        //  Detour install / uninstall.
+        // ===========================================================================================
+
+        private void EnsureHookInstalled()
+        {
+            lock (_hookLock)
+            {
+                if (_hookInstalled) return;
+
+                _pumpEntry = _coregameBase + RVA_PUMP;
+
+                _ctrl = VirtualAllocEx(_hProc, IntPtr.Zero, CB_SIZE, MEM_COMMIT_RESERVE, PAGE_READWRITE);
+                if (_ctrl == IntPtr.Zero) throw new InvalidOperationException("VirtualAllocEx(ctrl) failed");
+                MemoryHelper.WriteBytes(_hProc, _ctrl, new byte[CB_SIZE]);
+
+                byte[] stolen = MemoryHelper.ReadBytes(_hProc, (IntPtr)_pumpEntry, (int)PUMP_STOLEN);
+                // If the pump entry already starts with our jmp thunk, a previous run didn't clean up.
+                // Installing over it would relocate the stale jmp into our trampoline and corrupt the
+                // chain — bail with a clear message rather than silently misbehaving.
+                if (stolen[0] == 0xFF && stolen[1] == 0x25)
+                {
+                    VirtualFreeEx(_hProc, _ctrl, 0, MEM_RELEASE); _ctrl = IntPtr.Zero;
+                    throw new InvalidOperationException(
+                        "the game's pump is already hooked (a stale hook from a previous run) — "
+                        + "restart Control to clear it, then try again.");
+                }
+                _origPumpBytes = stolen;
+
+                // Lay out the code page: [hookCode][trampoline].
+                _codePage = VirtualAllocEx(_hProc, IntPtr.Zero, 0x200, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE);
+                if (_codePage == IntPtr.Zero) throw new InvalidOperationException("VirtualAllocEx(code) failed");
+
+                byte[] hookProbe = BuildHookCode(_ctrl.ToInt64(), 0); // length is address-independent
+                long trampAddr = _codePage.ToInt64() + Align(hookProbe.Length, 16);
+                byte[] trampoline = BuildTrampoline(stolen, _pumpEntry + PUMP_STOLEN);
+                long stubAddr = trampAddr + Align(trampoline.Length, 16);
+                byte[] hookCode = BuildHookCode(_ctrl.ToInt64(), trampAddr);
+
+                MemoryHelper.WriteBytes(_hProc, _codePage, hookCode);
+                MemoryHelper.WriteBytes(_hProc, (IntPtr)trampAddr, trampoline);
+                FlushInstructionCache(_hProc, _codePage, (IntPtr)0x200);
+
+                // Patch the pump entry to jump into the hook, with every game thread suspended so the
+                // 15-byte write can't be observed half-applied.
+                byte[] patch = BuildEntryPatch(_codePage.ToInt64(), (int)PUMP_STOLEN);
+                var suspended = SuspendAllThreads();
+                try
+                {
+                    MemoryHelper.WriteBytes(_hProc, (IntPtr)_pumpEntry, patch);
+                    FlushInstructionCache(_hProc, (IntPtr)_pumpEntry, (IntPtr)PUMP_STOLEN);
+                }
+                finally { ResumeThreads(suspended); }
+
+                _hookInstalled = true;
+            }
+        }
+
         private void UninstallHook()
         {
             lock (_hookLock)
@@ -372,6 +464,7 @@ namespace Ap.Control.Memory
                 catch { /* process may be gone already */ }
                 finally
                 {
+                    // Only safe to free the code page after the entry no longer jumps into it.
                     if (_codePage != IntPtr.Zero) { try { VirtualFreeEx(_hProc, _codePage, 0, MEM_RELEASE); } catch { } _codePage = IntPtr.Zero; }
                     if (_ctrl != IntPtr.Zero) { try { VirtualFreeEx(_hProc, _ctrl, 0, MEM_RELEASE); } catch { } _ctrl = IntPtr.Zero; }
                     _hookInstalled = false;
@@ -383,6 +476,11 @@ namespace Ap.Control.Memory
 
         // --- Shellcode builders --------------------------------------------------------------------
 
+        /// <summary>
+        /// The per-frame hook body. Runs at the pump entry with the original register state live, so it
+        /// saves everything it touches, services one pending RPC request if present, restores, then
+        /// jumps to the trampoline (which runs the stolen prologue and continues the real function).
+        /// </summary>
         private static byte[] BuildHookCode(long ctrl, long trampoline)
         {
             var b = new List<byte>();
@@ -399,6 +497,7 @@ namespace Ap.Control.Memory
             b.AddRange(new byte[] { 0x49, 0xFF, 0x43, CB_HEARTBEAT });                        // inc qword [r11+CB_HEARTBEAT]
             b.AddRange(new byte[] { 0x49, 0x83, 0x7B, CB_PENDING, 0x01 });                    // cmp qword [r11+CB_PENDING], 1
 
+            // The service branch. Built separately so the jne displacement is measured, not hand-counted.
             var svc = new List<byte>();
             svc.AddRange(new byte[] { 0x49, 0x8B, 0x4B, CB_A0 });    // mov rcx, [r11+CB_A0]
             svc.AddRange(new byte[] { 0x49, 0x8B, 0x53, CB_A1 });    // mov rdx, [r11+CB_A1]
@@ -424,6 +523,23 @@ namespace Ap.Control.Memory
             b.Add(0x58);                                           // pop rax
             b.AddRange(new byte[] { 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 }); // jmp qword ptr [rip+0]
             b.AddRange(BitConverter.GetBytes(trampoline));
+            return b.ToArray();
+        }
+
+        private static byte[] BuildTrampoline(byte[] stolen, long resumeAddr)
+        {
+            var b = new List<byte>(stolen);
+            b.AddRange(new byte[] { 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 }); // jmp qword ptr [rip+0]
+            b.AddRange(BitConverter.GetBytes(resumeAddr));
+            return b.ToArray();
+        }
+
+        private static byte[] BuildEntryPatch(long hookAddr, int totalLen)
+        {
+            var b = new List<byte>();
+            b.AddRange(new byte[] { 0xFF, 0x25, 0x00, 0x00, 0x00, 0x00 }); // jmp qword ptr [rip+0]
+            b.AddRange(BitConverter.GetBytes(hookAddr));
+            while (b.Count < totalLen) b.Add(0x90);                        // nop pad to a whole-instruction boundary
             return b.ToArray();
         }
 
