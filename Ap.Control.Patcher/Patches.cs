@@ -8,28 +8,6 @@ namespace Ap.Control.Patcher
         private const string Package = "ep100-000-generic";
         private const string Model = "g_ControlPointPrimeVisibilityState";
 
-        /// <summary>
-        /// Gate each elevator sector destination independently.
-        ///
-        /// The shipped panel decides its floor list from a single integer (the highest unlocked sector
-        /// index), which makes the destinations a strict ladder — Maintenance can never be enabled
-        /// without Research — and hardcodes the Pump Room entry as always available, a permanent back
-        /// door into Maintenance. The per-sector information is collapsed before the UI ever sees it,
-        /// so no amount of client-side work fixes it.
-        ///
-        /// Each condition is rewritten to read one bool from a UI model the client can write
-        /// (ControlPointPrimeVisibilityState — see Memory/NativeUiModelController.cs):
-        ///     m_bAbilitiesNew -> Research            m_bCraftingNew -> Maintenance (Lobby)
-        ///     m_bTrialsNew    -> Containment         m_bOutfitsNew  -> Investigation
-        ///     m_bAreControlPointsUpgraded -> Maintenance Pump Room
-        ///
-        /// Executive is deliberately untouched: it is the starting sector and the hub the player
-        /// returns to, so gating it risks a softlock.
-        ///
-        /// Length neutrality is free here — elevatorShouldDisable(e,t,n) ignores its first two
-        /// arguments, so every call collapses to a shorter '!cond' and the surplus is padded back.
-        /// Cost: the control-point "new" badges become meaningless, since the client drives those bytes.
-        /// </summary>
         internal static readonly PatchDef Elevator = new(
             Id: "elevator",
             Title: "Elevator sector gating",
@@ -60,22 +38,6 @@ namespace Ap.Control.Patcher
                 Encoding.ASCII.GetBytes($"!{Model}.m_bOutfitsNew"),
                 "ap-control-elevator-patch-pad"));
 
-        /// <summary>
-        /// Remove weapon FORM unlocks from the control-point shop, leaving level upgrades alone.
-        ///
-        /// Archipelago hands out the forms as items, but the stock shop still sells them, so a player
-        /// can craft what the multiworld was supposed to grant. Removing the whole Weapons tab would be
-        /// too blunt: once AP grants a form, its upgrades should still be purchasable as in vanilla.
-        ///
-        /// Every shop recipe carries m_bIsUpgrade, set engine-side, and it splits exactly on that line
-        /// ("Unlock SMG1" = false, "Upgrade SMG1 to SMG2" = true). It is live state rather than mock
-        /// convention: CraftedScreenBehaviour branches on it in shipped code. Filtering the weapon list
-        /// to m_bIsUpgrade therefore keeps upgrades and drops first-level unlocks.
-        ///
-        /// Grip needs no special case — internally Pistol=Grip, and Grip is owned from the start with no
-        /// unlock recipe anywhere in the bundle. DLC forms are covered for free, since the filter keys
-        /// off the flag rather than an enumerated list of forms.
-        /// </summary>
         internal static readonly PatchDef ShopWeapons = new(
             Id: "shop",
             Title: "Shop weapon-form lockout",
@@ -99,9 +61,7 @@ namespace Ap.Control.Patcher
         /// <summary>
         /// hud.ui is a D34DB33F container, not a bare JS file. The byte trade above only works while
         /// both sites live in the SAME payload blob — if a record boundary fell between them, one inner
-        /// resource would shrink and another grow, and both length prefixes would be wrong. Stock hud.ui
-        /// keeps all its records in the header plus a trailer, so this holds; re-checking here means a
-        /// game update that changes the layout makes the patch refuse rather than corrupt the archive.
+        /// resource would shrink and another grow, and both length prefixes would be wrong.
         /// </summary>
         private static string? NoRecordBoundaryBetweenEdits(byte[] patched)
         {
@@ -117,7 +77,34 @@ namespace Ap.Control.Patcher
                 : null;
         }
 
-        internal static readonly IReadOnlyList<PatchDef> All = [Elevator, ShopWeapons];
+        internal static readonly PatchDef AbilitiesLock = new(
+            Id: "abilities",
+            Title: "Ability-upgrade menu lockout",
+            Package: Package,
+            Target: "hud.ui",
+            Edits:
+            [
+                Edit.Of("AbilitiesSyncState",
+                    "s.m_eAbilityUpgradeState=o.m_eAbilityUpgradeState",
+                    "s.m_eAbilityUpgradeState=o.m_eAbilityUpgradeState===r.AbilityUpgradeState.UPGRADE_AVAILABLE"
+                    + "?r.AbilityUpgradeState.UPGRADE_LOCKED:o.m_eAbilityUpgradeState"),
+                Edit.Of("AbilitiesCloneState",
+                    "m_eAbilityUpgradeState:e.m_eAbilityUpgradeState",
+                    "m_eAbilityUpgradeState:e.m_eAbilityUpgradeState===r.AbilityUpgradeState.UPGRADE_AVAILABLE"
+                    + "?r.AbilityUpgradeState.UPGRADE_LOCKED:e.m_eAbilityUpgradeState"),
+                Edit.Of("AbilitiesTreeNeverLocked",
+                    "isTreeLocked(e){if(!e)return!1;const t=this.getUnlockTypeForAbilityType(e.m_eAbilityUpgradeType);"
+                    + "if(t)for(const e of this.abilities.keys()){const o=this.abilities.get(e);"
+                    + "if(o&&o.m_eAbilityUpgradeType===t)return o.m_eAbilityUpgradeState!==r.AbilityUpgradeState.UPGRADE_BOUGHT}"
+                    + "return!1}",
+                    "isTreeLocked(e){return!1}"),
+            ],
+
+            Balance: new PadBalancer(
+                Encoding.ASCII.GetBytes("isTreeLocked(e){return!1}"),
+                "ap-control-abilities-patch-pad"));
+
+        internal static readonly IReadOnlyList<PatchDef> All = [Elevator, ShopWeapons, AbilitiesLock];
 
         internal static PatchDef? ById(string id)
             => All.FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));

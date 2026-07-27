@@ -19,21 +19,33 @@ namespace Ap.Control.Models
         /// Grant one step of Security Clearance: the Nth such item received grants clearance N.
         /// Carries no level of its own — the client counts them.
         /// </summary>
-        ProgressiveClearance
+        ProgressiveClearance,
+        /// <summary>
+        /// Grant an ability-tree upgrade (or menu-purchasable base ability unlock — same mechanism) by
+        /// its type-77 <c>ability_upgrades\*</c> definition GID, via <see cref="Gid"/>.
+        /// </summary>
+        Ability,
+        /// <summary>
+        /// Grant one step of the ability-point milestone rewards (extra weapon slot, then two personal-
+        /// mod slots). Carries no level of its own — the Nth such item received grants milestone N,
+        /// exactly like <see cref="ProgressiveClearance"/>.
+        /// </summary>
+        ProgressiveMilestone
     }
 
     /// <summary>
     /// What receiving a given Archipelago item should do. Produced by the item map and consumed by
     /// the client's dispatch. Exactly one payload field is meaningful per <see cref="Kind"/>:
-    /// <see cref="Gid"/> for Inventory, <see cref="Flags"/> for Flag, <see cref="Level"/> for Clearance,
-    /// <see cref="Ability"/> for Ability. ProgressiveClearance carries no payload — its level comes from
-    /// how many of them the client has received.
+    /// <see cref="Gid"/> for Inventory and Ability, <see cref="Flags"/> for Flag, <see cref="Level"/>
+    /// for Clearance. ProgressiveClearance carries no payload — its level comes from how many of them
+    /// the client has received.
     /// </summary>
     public sealed record ApItemAction(
         ApActionKind Kind, ulong Gid = 0UL, IReadOnlyList<string>? Flags = null, int Level = 0,
-        string? Ability = null, IReadOnlyList<ElevatorBit>? Bits = null)
+        IReadOnlyList<ElevatorBit>? Bits = null)
     {
         public static ApItemAction ForInventory(ulong gid) => new(ApActionKind.Inventory, Gid: gid);
+        public static ApItemAction ForAbility(ulong gid) => new(ApActionKind.Ability, Gid: gid);
         public static ApItemAction ForFlag(string flag) => new(ApActionKind.Flag, Flags: new[] { flag });
 
         /// <summary>
@@ -46,5 +58,6 @@ namespace Ap.Control.Models
             new(ApActionKind.Flag, Flags: flags, Bits: bits);
         public static ApItemAction ForClearance(int level) => new(ApActionKind.Clearance, Level: level);
         public static ApItemAction ProgressiveClearance { get; } = new(ApActionKind.ProgressiveClearance);
+        public static ApItemAction ProgressiveMilestone { get; } = new(ApActionKind.ProgressiveMilestone);
     }
 }

@@ -28,9 +28,11 @@ namespace Ap.Control
         /// How often to re-write the elevator UI bits.
         /// </summary>
         private const int UiBitIntervalMs = 100;
+        private const int MaxMilestoneLevel = 3;
 
         private ArchipelagoSession _session;
         private readonly IItemGranter _granter;
+        private readonly IAbilityGranter _abilityGranter;
         private readonly IGameFlowController _gameflow;
         private readonly IUiModelController _uiModel;
         private readonly ApItemMap _itemMap;
@@ -42,8 +44,10 @@ namespace Ap.Control
         // Which elevator UI bits AP has granted. 
         private readonly HashSet<ElevatorBit> _grantedBits = new();
         private int _grantedClearance;
-        // How many Progressive Clearance Level items have arrived. 
+        // How many Progressive Clearance Level items have arrived.
         private int _progressiveClearance;
+        // How many Progressive Ability Milestone items have arrived (Nth -> milestone level N).
+        private int _progressiveMilestone;
         // Last enforcement target we logged, so steady-state reconciles stay quiet and only changes show.
         private string? _lastReconcileSig;
         // Serialises reconcile passes — the save-watch thread and the timer both drive GameFlow writes.
@@ -62,11 +66,12 @@ namespace Ap.Control
         // Which inventory grants have physically happened.
         private InventoryGrantLog? _grantLog;
 
-        public ArchipelagoClient(ArchipelagoConnectionModel model, IItemGranter granter,
+        public ArchipelagoClient(ArchipelagoConnectionModel model, IItemGranter granter, IAbilityGranter abilityGranter,
             IGameFlowController gameflow, IUiModelController uiModel, ApItemMap itemMap)
         {
             _session = createSession(model);
             _granter = granter;
+            _abilityGranter = abilityGranter;
             _gameflow = gameflow;
             _uiModel = uiModel;
             _itemMap = itemMap;
@@ -309,6 +314,14 @@ namespace Ap.Control
                             " (game returned 0 — not a spawnable def, or content not resident here)");
                         break;
 
+                    case ApActionKind.Ability:
+                        GrantAbility(action.Gid, ordinal);
+                        break;
+
+                    case ApActionKind.ProgressiveMilestone:
+                        GrantProgressiveMilestone(ordinal);
+                        break;
+
                     case ApActionKind.Flag:
                         lock (_grantLock)
                         {
@@ -376,6 +389,55 @@ namespace Ap.Control
 
             Console.WriteLine($"  -> inventory: GID 0x{gid:X} -> {gr}"
                 + (gr.Ok && !gr.Accepted ? notAcceptedHint : "")
+                + (gr.Ok ? "" : " (not recorded — will retry on next connect)"));
+        }
+
+        /// <summary>
+        /// Grant one ability-tree upgrade (or menu-purchasable base ability unlock), unless the grant
+        /// log says this ordinal was already granted on an earlier connect.
+        /// </summary>
+        private void GrantAbility(ulong definitionGid, int ordinal)
+        {
+            var log = GrantLog();
+            if (log.IsGranted(ordinal))
+            {
+                Console.WriteLine($"  -> ability: GID 0x{definitionGid:X} already granted on an earlier connect — skipped");
+                return;
+            }
+
+            GrantResult gr = _abilityGranter.GrantAbilityAsync(definitionGid).Result;
+            if (gr.Ok)
+                log.MarkGranted(ordinal);
+
+            Console.WriteLine($"  -> ability: GID 0x{definitionGid:X} -> {gr}"
+                + (gr.Ok ? "" : " (not recorded — will retry on next connect)"));
+        }
+
+
+        /// <summary>
+        /// Grant the ability-point milestone reward for the Nth Progressive Ability Milestone item received
+        /// </summary>
+        private void GrantProgressiveMilestone(int ordinal)
+        {
+            int level;
+            lock (_grantLock)
+            {
+                _progressiveMilestone = Math.Min(_progressiveMilestone + 1, MaxMilestoneLevel);
+                level = _progressiveMilestone;
+            }
+
+            var log = GrantLog();
+            if (log.IsGranted(ordinal))
+            {
+                Console.WriteLine($"  -> milestone: progressive #{level} already granted on an earlier connect — skipped");
+                return;
+            }
+
+            GrantResult gr = _abilityGranter.GrantMilestoneAsync(level).Result;
+            if (gr.Ok)
+                log.MarkGranted(ordinal);
+
+            Console.WriteLine($"  -> milestone: progressive #{level} (weapon/mod slots up to level {level}) -> {gr}"
                 + (gr.Ok ? "" : " (not recorded — will retry on next connect)"));
         }
     }
