@@ -2,7 +2,7 @@
   "profiles": {
     "Revert all": {
       "commandName": "Project",
-      "commandLineArgs": "restore abilities"
+      "commandLineArgs": "restore all"
     },
     "Apply all": {
       "commandName": "Project",

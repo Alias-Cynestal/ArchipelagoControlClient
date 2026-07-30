@@ -59,6 +59,8 @@ static async Task<int> RunClientAsync(string[] args)
         return 1;
     }
 
+    Console.WriteLine(GameBuildRegistry.StartupBanner());
+
     using var client = new ArchipelagoClient(model, granter, abilityGranter, gameflow, uiModel, itemMap);
     try
     {
