@@ -71,6 +71,7 @@ static async Task<int> RunClientAsync(string[] args)
         Console.Error.WriteLine($"[item-map] failed to load: {e.Message}");
         return 1;
     }
+    Console.WriteLine(GameBuildRegistry.StartupBanner());
 
     var relay = new SaveNotifierRelay();
     using var session = new ApSessionHost(granter, abilityGranter, gameflow, itemMap, relay);

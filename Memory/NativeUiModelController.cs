@@ -11,7 +11,6 @@ namespace Ap.Control.Memory
     {
         private const string ProcessName = "Control_DX12";
 
-        private const long UiHudVtableRva = 0xE5E5E8;
         private const int OffOwner = 0x1A0;   // UIHud -> owning object
         private const int OffModel = 0x18;    // owning object -> the 5-bool model
         private const int FieldCount = 5;
@@ -23,8 +22,11 @@ namespace Ap.Control.Memory
         private IntPtr _hProc;
         private long _moduleBase;
         private long _modelAddr;   // 0 = unresolved
+        private GameBuildProfile? _profile;
 
         public bool IsOpen => _hProc != IntPtr.Zero;
+
+        public string? BuildError { get; private set; }
 
         /// <summary>Attach to the running game. Returns false (rather than throwing) if it isn't up.</summary>
         public bool EnsureStarted()
@@ -33,6 +35,10 @@ namespace Ap.Control.Memory
 
             Process? proc = Process.GetProcessesByName(ProcessName).FirstOrDefault();
             if (proc?.MainModule is null) return false;
+
+            try { _profile = GameBuildRegistry.Resolve(proc); BuildError = null; }
+            catch (UnsupportedGameBuildException e) { BuildError = e.Message; return false; }
+            catch { return false; }
 
             IntPtr h = OpenProcess(PROCESS_ACCESS, false, proc.Id);
             if (h == IntPtr.Zero) return false;
@@ -93,7 +99,7 @@ namespace Ap.Control.Memory
                 _modelAddr = 0;
             }
 
-            foreach (long hud in ScanForVtable(_moduleBase + UiHudVtableRva))
+            foreach (long hud in ScanForVtable(_moduleBase + _profile!.UiHudVtable))
             {
                 var ptr = new byte[8];
                 if (!ReadProcessMemory(_hProc, (IntPtr)(hud + OffOwner), ptr, 8, out int r) || r != 8) continue;

@@ -7,9 +7,7 @@ namespace Ap.Control.Memory
 {
     public sealed class NativeItemGranter : IItemGranter
     {
-        // --- Build-specific addresses (RVA from image base 0x140000000) -----------------------
-        private const long RVA_GIVE_FROM_DEF   = 0x3b6c30;   // FUN_1403b6c30(this, char fire, GID* def, float amount) -> spawned obj
-        private const long RVA_INVENTORY_VTBL  = 0x0e28a18;  // GameInventoryComponentState vtable
+        // Build-specific addresses come from GameBuildProfile, keyed on the executable's hash.
         private const int  OFF_IS_PLAYER       = 0x90;       // byte flag == 1 on the player's inventory
         private const string ProcessName       = "Control_DX12";
         private const string CoregameModule     = "coregame_rmdwin10_f.dll";
@@ -18,6 +16,8 @@ namespace Ap.Control.Memory
         private IntPtr _imageBase;
         private long   _coregameBase;
         private IntPtr _playerSelf;
+        private GameBuildProfile? _profile;
+        private string? _buildError;   // set when the running build has no profile; reported instead of a generic failure
         private readonly List<IntPtr> _candidates = new();
 
         public bool IsReady => _playerSelf != IntPtr.Zero;
@@ -44,6 +44,8 @@ namespace Ap.Control.Memory
 
             Process proc = MemoryHelper.GetProcessOrThrow(ProcessName);
 
+            _profile = GameBuildRegistry.Resolve(proc);   // throws UnsupportedGameBuildException
+
             _imageBase = proc.MainModule?.BaseAddress
                 ?? throw new InvalidOperationException("Could not read the game's image base.");
 
@@ -62,9 +64,15 @@ namespace Ap.Control.Memory
         private bool EnsureStarted()
         {
             if (_hProc != IntPtr.Zero) return true;
-            try { StartCore(); } catch { /* game not running / not openable yet */ }
+            try { StartCore(); _buildError = null; }
+            catch (UnsupportedGameBuildException e) { _buildError = e.Message; }
+            catch { /* game not running / not openable yet */ }
             return _hProc != IntPtr.Zero;
         }
+
+        /// <summary>Why the granter could not attach — the build error if there is one, else the generic cause.</summary>
+        private string NotStartedReason =>
+            _buildError ?? $"granter not started — is {ProcessName} running?";
 
         public Task<GrantResult> GiveItemAsync(ulong gid, float parameter = 1.0f, CancellationToken cancellationToken = default)
             => Task.Run(() => GiveItem(gid, parameter), cancellationToken);
@@ -72,7 +80,7 @@ namespace Ap.Control.Memory
         // 'parameter' is the item's engine Parameter float (stored on the spawned item at +0x58);
         private GrantResult GiveItem(ulong gid, float parameter)
         {
-            if (!EnsureStarted()) return GrantResult.Fail("granter not started — is Control_DX12 running?");
+            if (!EnsureStarted()) return GrantResult.Fail(NotStartedReason);
 
             if (!IsValidPlayerInventory(_playerSelf))
             {
@@ -95,7 +103,7 @@ namespace Ap.Control.Memory
                     thisPtr: _playerSelf,
                     defPtr: def,
                     parameter: parameter,
-                    giveFn: (IntPtr)(_imageBase.ToInt64() + RVA_GIVE_FROM_DEF),
+                    giveFn: (IntPtr)(_imageBase.ToInt64() + Profile.GiveItemFromDefinition),
                     resultSlot: result);
 
                 code = VirtualAllocEx(_hProc, IntPtr.Zero, shellcode.Length, MEM_COMMIT_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -145,13 +153,17 @@ namespace Ap.Control.Memory
 
         // --- Player-inventory discovery -------------------------------------------------------
 
+        /// <summary>The resolved build profile. Non-null once <see cref="EnsureStarted"/> has returned true.</summary>
+        private GameBuildProfile Profile =>
+            _profile ?? throw new InvalidOperationException("game build has not been identified yet.");
+
         private bool IsValidPlayerInventory(IntPtr candidate)
         {
             if (candidate == IntPtr.Zero) return false;
             try
             {
                 ulong vtbl = MemoryHelper.ReadU64(_hProc, candidate);
-                if (vtbl != (ulong)(_imageBase.ToInt64() + RVA_INVENTORY_VTBL)) return false;
+                if (vtbl != (ulong)(_imageBase.ToInt64() + Profile.InventoryVtable)) return false;
                 return MemoryHelper.ReadByte(_hProc, candidate + OFF_IS_PLAYER) == 1;
             }
             catch { return false; }
@@ -164,7 +176,7 @@ namespace Ap.Control.Memory
         private IntPtr FindPlayerInventory()
         {
             _candidates.Clear();
-            ulong wantVtbl = (ulong)(_imageBase.ToInt64() + RVA_INVENTORY_VTBL);
+            ulong wantVtbl = (ulong)(_imageBase.ToInt64() + Profile.InventoryVtable);
             byte[] want = BitConverter.GetBytes(wantVtbl);
 
             var buf = new byte[0x100000];   // 1 MiB scan window

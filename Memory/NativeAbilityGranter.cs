@@ -24,33 +24,18 @@ namespace Ap.Control.Memory
     public sealed class NativeAbilityGranter : IAbilityGranter
     {
         // --- Build-specific addresses ---------------------------------------------------------------
-        // Control_DX12.exe RVAs (image base 0x140000000):
-        private const long RVA_MGR_SLOT           = 0x1239360; // *(*(this)+0x30) = PlayerPropertiesComponentState (mgr)
         private const int  MGR_OFF_INSTANCE        = 0x30;
         private const int  MGR_OFF_OWNER           = 0x28;     // owner entity ptr; FireApplyPin arg = *(owner)+0x18
         private const int  MGR_OFF_PIN             = 0xf8;     // apply output-pin handle (FireApplyPin's rdx = mgr+0xf8)
         private const int  MGR_OFF_ROLE_SRC        = 0x18;     // top 2 bits = NetworkRole (for the post-grant saveGame)
-
-        private const long RVA_FIRE_APPLY_PIN      = 0x211490; // AbilityTree_FireApplyPin(FlowConnMgr, pin, GID*, arg*) — direct
-        private const long RVA_FLOWCONNMGR_HOLDER  = 0xda1058; // *(*(holder)) = FlowConnectionManager singleton
-        private const long RVA_SAVEGAME_THUNK      = 0xd9c438; // coregame::GameHelper::saveGame(NetworkRole,0,0) — *(thunk) is the fn
 
         // Ability-point milestone rewards (weapon slot / 2 mod slots). Gated on the spent-points high-
         // water mark mgr+0x50 vs three runtime thresholds; the reward is applied by firing the milestone
         // output pin mgr+0x120 with the generic pin-fire FUN_14006a030(FlowConnMgr, pin).
         private const int  MGR_OFF_SPENT_HIGHWATER = 0x50;    // int; compared against the milestone thresholds
         private const int  MGR_OFF_MILESTONE_PIN   = 0x120;   // milestone reward output-pin handle
-        private const long RVA_FIRE_PIN            = 0x6a030; // FUN_14006a030(FlowConnMgr, pin) — direct, fires an output pin
-        // Milestone thresholds (runtime ints, populated when the ability tree loads), ascending:
-        private static readonly long[] MilestoneThresholdRvas =
-        {
-            0x12b00a0, // ABILITY_MILESTONE_WEAPON_SLOT
-            0x12affe0, // ABILITY_MILESTONE_EXTRA_MOD_SLOT (first)
-            0x12aff20, // ABILITY_MILESTONE_EXTRA_MOD_SLOT (second; also the progress-bar max)
-        };
 
         // GameObjectManager entity-table scan (menu-free enumeration — pure reads, no calls):
-        private const long RVA_GOM_CONTAINER   = 0xda10b0;  // P = *(exe+0xda10b0); GOM(role) = *(P + roleOffset)
         private static readonly int[] GomRoleOffsets = { -8, 0, 8 };
         private const long GOM_TABLE           = 0x310;     // entity pointer array
         private const int  GOM_TABLE_SLOTS     = 0x20000;   // index masked with 0x1ffff -> 131072 slots
@@ -58,9 +43,6 @@ namespace Ap.Control.Memory
         private const int  ENT_ARCHETYPE_GID   = 0x80;      // EntityState+0x80 = archetype (definition) GID
         private const uint GID_TYPE_MASK       = 0x3fff;    // low 14 bits = content type tag
         private const uint TYPE_ABILITY_UPGRADE = 77;       // ability_upgrades\* content type (0x4D)
-
-        // coregame_rmdwin10_f.dll RVA:
-        private const long RVA_PUMP                = 0x7e0a0;  // coregame::DynamicEntitySpawner::update (per-frame, main thread)
 
         private const string ProcessName    = "Control_DX12";
         private const string CoregameModule  = "coregame_rmdwin10_f.dll";
@@ -87,6 +69,12 @@ namespace Ap.Control.Memory
         private IntPtr _imageBase;
         private long   _coregameBase;
         private int    _pid;
+        private GameBuildProfile? _profile;
+        private string? _buildError;   // set when the running build has no profile; reported instead of a generic failure
+
+        /// <summary>The resolved build profile. Non-null once <see cref="EnsureStarted"/> has returned true.</summary>
+        private GameBuildProfile Profile =>
+            _profile ?? throw new InvalidOperationException("game build has not been identified yet.");
 
         // Hook state
         private readonly object _hookLock = new();
@@ -113,6 +101,9 @@ namespace Ap.Control.Memory
             if (_hProc != IntPtr.Zero) return;
 
             Process proc = MemoryHelper.GetProcessOrThrow(ProcessName);
+
+            _profile = GameBuildRegistry.Resolve(proc);   // throws UnsupportedGameBuildException
+
             _imageBase = proc.MainModule?.BaseAddress
                 ?? throw new InvalidOperationException("Could not read the game's image base.");
             _pid = proc.Id;
@@ -132,9 +123,15 @@ namespace Ap.Control.Memory
         private bool EnsureStarted()
         {
             if (_hProc != IntPtr.Zero) return true;
-            try { StartCore(); } catch { /* game not running / not openable yet */ }
+            try { StartCore(); _buildError = null; }
+            catch (UnsupportedGameBuildException e) { _buildError = e.Message; }
+            catch { /* game not running / not openable yet */ }
             return _hProc != IntPtr.Zero;
         }
+
+        /// <summary>Why the granter could not attach — the build error if there is one, else the generic cause.</summary>
+        private string NotStartedReason =>
+            _buildError ?? $"granter not started — is {ProcessName} running?";
 
         // ===========================================================================================
         //  Phase-1 probe: enumerate live upgrade instances and resolve each to its definition GID.
@@ -159,7 +156,8 @@ namespace Ap.Control.Memory
         /// </summary>
         private UpgradeScan ScanAbilityUpgradeInstances(bool verbose)
         {
-            long container = (long)ReadChecked(_imageBase.ToInt64() + RVA_GOM_CONTAINER, "GOM container (exe+0xda10b0)");
+            long gomRva = Profile.GomContainer;
+            long container = (long)ReadChecked(_imageBase.ToInt64() + gomRva, $"GOM container (exe+0x{gomRva:x})");
             if (verbose) Console.WriteLine($"  GOM container = 0x{container:X}");
 
             var result = new List<LiveUpgrade>();
@@ -276,7 +274,7 @@ namespace Ap.Control.Memory
         /// </summary>
         public GrantResult GrantAbility(ulong definitionGid, bool verbose)
         {
-            if (!EnsureStarted()) return GrantResult.Fail("granter not started — is Control_DX12 running?");
+            if (!EnsureStarted()) return GrantResult.Fail(NotStartedReason);
 
             UpgradeScan scan;
             List<ulong> instances;
@@ -301,17 +299,16 @@ namespace Ap.Control.Memory
             {
                 EnsureHookInstalled();
 
-                long container = (long)ReadChecked(_imageBase.ToInt64() + RVA_MGR_SLOT, "mgr container (exe+0x1239360)");
-                long mgr = container == 0 ? 0 : (long)ReadPtr(container + MGR_OFF_INSTANCE);
+                long mgr = ResolveAbilityManager();
                 if (mgr == 0) return GrantResult.Fail("ability-tree manager not resolved — is a save loaded?");
 
-                long flowHolder = (long)ReadPtr(_imageBase.ToInt64() + RVA_FLOWCONNMGR_HOLDER);
+                long flowHolder = (long)ReadPtr(_imageBase.ToInt64() + Profile.FlowConnMgrHolder);
                 long flowMgr = flowHolder == 0 ? 0 : (long)ReadPtr(flowHolder);
                 long owner = (long)ReadPtr(mgr + MGR_OFF_OWNER);
                 ulong arg = owner == 0 ? 0UL : MemoryHelper.ReadU64(_hProc, (IntPtr)(owner + 0x18));
                 if (flowMgr == 0) return GrantResult.Fail("FlowConnectionManager not resolved.");
 
-                long fireFn = _imageBase.ToInt64() + RVA_FIRE_APPLY_PIN;
+                long fireFn = _imageBase.ToInt64() + Profile.FireApplyPin;
                 MemoryHelper.WriteBytes(_hProc, (IntPtr)(_ctrl.ToInt64() + CB_ARCH), BitConverter.GetBytes(arg));
 
                 bool applied = false;
@@ -336,32 +333,27 @@ namespace Ap.Control.Memory
             => Task.Run(() => GrantMilestone(level, verbose: false), cancellationToken);
 
         /// <summary>
-        /// Grant the ability-point milestone rewards up to <paramref name="level"/> (1 = weapon slot,
-        /// 2 = +first mod slot, 3 = +second mod slot). Milestones are cumulative — a single spent-points
-        /// high-water counter (mgr+0x50) crossing runtime thresholds — so this raises that counter to the
-        /// level's threshold and fires the milestone reward pin (mgr+0x120) on the main thread, which
-        /// grants every perk unlocked at that level. Intended to be driven progressively: the Nth
-        /// progressive-milestone AP item received calls this with level N.
+        /// Grant the ability-point milestone rewards up to <paramref name="level"/>
         /// </summary>
         public GrantResult GrantMilestone(int level, bool verbose)
         {
-            if (level < 1 || level > MilestoneThresholdRvas.Length)
-                return GrantResult.Fail($"milestone level {level} out of range (1..{MilestoneThresholdRvas.Length})");
-            if (!EnsureStarted()) return GrantResult.Fail("granter not started — is Control_DX12 running?");
+            if (level < 1 || level > GameBuildProfile.MilestoneLevels)
+                return GrantResult.Fail($"milestone level {level} out of range (1..{GameBuildProfile.MilestoneLevels})");
+            if (!EnsureStarted()) return GrantResult.Fail(NotStartedReason);
 
             try
             {
                 EnsureHookInstalled();
 
-                long container = (long)ReadChecked(_imageBase.ToInt64() + RVA_MGR_SLOT, "mgr container (exe+0x1239360)");
-                long mgr = container == 0 ? 0 : (long)ReadPtr(container + MGR_OFF_INSTANCE);
+                long mgr = ResolveAbilityManager();
                 if (mgr == 0) return GrantResult.Fail("ability-tree manager not resolved — is a save loaded?");
 
-                long flowHolder = (long)ReadPtr(_imageBase.ToInt64() + RVA_FLOWCONNMGR_HOLDER);
+                long flowHolder = (long)ReadPtr(_imageBase.ToInt64() + Profile.FlowConnMgrHolder);
                 long flowMgr = flowHolder == 0 ? 0 : (long)ReadPtr(flowHolder);
                 if (flowMgr == 0) return GrantResult.Fail("FlowConnectionManager not resolved.");
 
-                int threshold = MemoryHelper.ReadI32(_hProc, (IntPtr)(_imageBase.ToInt64() + MilestoneThresholdRvas[level - 1]));
+                int threshold = MemoryHelper.ReadI32(_hProc,
+                    (IntPtr)(_imageBase.ToInt64() + Profile.MilestoneThresholds[level - 1]));
                 if (threshold <= 0)
                     return GrantResult.Fail(
                         $"milestone threshold for level {level} reads {threshold} — not loaded yet (in active gameplay?)");
@@ -375,7 +367,7 @@ namespace Ap.Control.Memory
                 if (verbose) Console.WriteLine($"  level {level}: threshold={threshold}, spent-highwater {current} -> "
                     + $"{Math.Max(current, threshold)}");
 
-                MainThreadCall(_imageBase.ToInt64() + RVA_FIRE_PIN, flowMgr, mgr + MGR_OFF_MILESTONE_PIN, 0, 0);
+                MainThreadCall(_imageBase.ToInt64() + Profile.FirePin, flowMgr, mgr + MGR_OFF_MILESTONE_PIN, 0, 0);
                 if (verbose) Console.WriteLine("  fired milestone reward pin (mgr+0x120)");
 
                 SaveGame(mgr);
@@ -384,13 +376,21 @@ namespace Ap.Control.Memory
             catch (Exception e) { return GrantResult.Fail($"milestone grant failed: {e.Message}"); }
         }
 
+        /// <summary>Resolve the ability-tree manager (PlayerPropertiesComponentState), or 0 if no save is loaded.</summary>
+        private long ResolveAbilityManager()
+        {
+            long slot = Profile.AbilityMgrSlot;
+            long container = (long)ReadChecked(_imageBase.ToInt64() + slot, $"mgr container (exe+0x{slot:x})");
+            return container == 0 ? 0 : (long)ReadPtr(container + MGR_OFF_INSTANCE);
+        }
+
         /// <summary>Persist, matching ApplyUpgrade's own success path (role from mgr+0x18 top 2 bits).</summary>
         private void SaveGame(long mgr)
         {
             ulong roleRaw = MemoryHelper.ReadU64(_hProc, (IntPtr)(mgr + MGR_OFF_ROLE_SRC));
             int top2 = (int)(roleRaw >> 62);
             long role = top2 == 2 ? 1 : top2 == 3 ? 2 : 0;
-            long saveFn = (long)ReadPtr(_imageBase.ToInt64() + RVA_SAVEGAME_THUNK);
+            long saveFn = (long)ReadPtr(_imageBase.ToInt64() + Profile.SaveGameThunk);
             if (saveFn != 0) { try { MainThreadCall(saveFn, role, 0, 0, 0); } catch { /* change already applied */ } }
         }
 
@@ -450,7 +450,7 @@ namespace Ap.Control.Memory
             {
                 if (_hookInstalled) return;
 
-                _pumpEntry = _coregameBase + RVA_PUMP;
+                _pumpEntry = _coregameBase + Profile.CoregamePump;
 
                 _ctrl = VirtualAllocEx(_hProc, IntPtr.Zero, CB_SIZE, MEM_COMMIT_RESERVE, PAGE_READWRITE);
                 if (_ctrl == IntPtr.Zero) throw new InvalidOperationException("VirtualAllocEx(ctrl) failed");
