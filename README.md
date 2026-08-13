@@ -22,11 +22,7 @@ Great question! The patcher modifies your game files for two specifics reasons. 
 The second reason is to lock the normal way of unlocking weapons (the Astral Constructs menu), which means you'll need to use the Archipelago to unlock them.
 
 ## Client
-To run the client, make sure that you have started a new Control game. Open a Terminal window and run the following command:
-```cmd
-Ap.Control.exe --server <url> --username <name> [--password <pass>]
-```
-This should connect the multiples processes that allow to read and write inside the game. As a note, you should put the prefix ws:// or wss:// before the server url, since it is required to connect to the server.
+To run the client, you can open the executable before launching the game. You will have access to a page to log into the Archipelago in the Main Menu as well as in the Pause Menu. If you do not have a save yet or your current save is from the Archipelago, you can login from the Main Menu just fine, or wait until you are in game. If you already have a save loaded that is not from the Archipelago, I would start a new game and then log in from the pause menu.
 
 ## Note on location unlocking
 
