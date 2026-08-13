@@ -7,6 +7,10 @@
     "Apply all": {
       "commandName": "Project",
       "commandLineArgs": "apply all"
+    },
+    "Profile 1": {
+      "commandName": "Project",
+      "commandLineArgs": "apply elevator"
     }
   }
 }

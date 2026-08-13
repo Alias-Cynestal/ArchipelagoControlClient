@@ -142,11 +142,19 @@ namespace Ap.Control.Memory
         public readonly record struct LiveUpgrade(ulong InstanceGid, ulong DefinitionGid);
 
         /// <summary>
+        /// A scan of the entity table, with enough of the shape of what was walked to tell the three
+        /// zero-result cases apart: the table was unreadable (wrong build / bad addresses), it was
+        /// readable but empty (no save loaded), or it was populated and the target simply is not in it.
+        /// </summary>
+        private readonly record struct UpgradeScan(
+            List<LiveUpgrade> Upgrades, int Goms, int Entities, int SlotsRead);
+
+        /// <summary>
         /// Menu-free enumeration: walk the GameObjectManager entity table(s) and collect every live
         /// entity whose archetype is a type-77 <c>ability_upgrades\*</c> definition, pairing each
         /// instance GID with its definition GID. Pure reads — no game calls, no pump, nothing mutated.
         /// </summary>
-        private List<LiveUpgrade> ScanAbilityUpgradeInstances(bool verbose)
+        private UpgradeScan ScanAbilityUpgradeInstances(bool verbose)
         {
             long gomRva = Profile.GomContainer;
             long container = (long)ReadChecked(_imageBase.ToInt64() + gomRva, $"GOM container (exe+0x{gomRva:x})");
@@ -157,6 +165,7 @@ namespace Ap.Control.Memory
             var seenInst = new HashSet<ulong>();
             var ptrArray = new byte[0x10000 * 8];   // 64k pointers per chunk
             var scratch8 = new byte[8];
+            int goms = 0, entities = 0, slotsRead = 0;
 
             foreach (int off in GomRoleOffsets)
             {
@@ -164,6 +173,7 @@ namespace Ap.Control.Memory
                 if (gb is null) continue;
                 long gom = BitConverter.ToInt64(gb, 0);
                 if (gom == 0 || !seenGom.Add(gom)) continue;
+                goms++;
 
                 long tableBase = gom + GOM_TABLE;
                 int nonNull = 0, matched = 0;
@@ -172,6 +182,7 @@ namespace Ap.Control.Memory
                     int take = Math.Min(0x10000, GOM_TABLE_SLOTS - s);
                     if (!MemoryHelper.TryReadBytes(_hProc, (IntPtr)(tableBase + (long)s * 8), ptrArray, take * 8, out _))
                         break;   // table shorter than the mask allows, or unmapped tail
+                    slotsRead += take;
                     for (int j = 0; j < take; j++)
                     {
                         long e = BitConverter.ToInt64(ptrArray, j * 8);
@@ -193,10 +204,53 @@ namespace Ap.Control.Memory
                     }
                     s += take;
                 }
+                entities += nonNull;
                 if (verbose)
                     Console.WriteLine($"  GOM(off {off,2}) = 0x{gom:X}: {nonNull} live entities, {matched} type-77 ability upgrade(s)");
             }
-            return result;
+            return new UpgradeScan(result, goms, entities, slotsRead);
+        }
+
+        /// <summary>
+        /// A full table walk costs two reads per live entity, and a stalled grant queue retries every
+        /// held ability once a second — without this, one connect at the main menu turns into dozens of
+        /// scans per tick. The window is short enough that a save loading is picked up on the next pass.
+        /// </summary>
+        private const int ScanCacheMs = 500;
+        private readonly object _scanLock = new();
+        private UpgradeScan _scanCache;
+        private DateTime _scanCacheUtc = DateTime.MinValue;
+
+        private UpgradeScan ScanCached(bool verbose)
+        {
+            lock (_scanLock)
+            {
+                if (!verbose && _scanCache.Upgrades is not null
+                    && DateTime.UtcNow - _scanCacheUtc < TimeSpan.FromMilliseconds(ScanCacheMs))
+                    return _scanCache;
+
+                UpgradeScan scan = ScanAbilityUpgradeInstances(verbose);
+                _scanCache = scan;
+                _scanCacheUtc = DateTime.UtcNow;
+                return scan;
+            }
+        }
+
+        /// <summary>Why a definition resolved to nothing, in terms of what the scan actually saw.</summary>
+        private static string DescribeMiss(ulong definitionGid, in UpgradeScan scan)
+        {
+            string what = $"no live instance for definition 0x{definitionGid:X}";
+            if (scan.Goms == 0 || scan.SlotsRead == 0)
+                return $"{what} — the entity table could not be read at all "
+                    + $"({scan.Goms} manager(s), {scan.SlotsRead} slot(s) read); the game's addresses may not "
+                    + "match this build.";
+            if (scan.Entities == 0)
+                return $"{what} — the entity table is empty ({scan.SlotsRead} slots scanned), so no save is loaded.";
+            if (scan.Upgrades.Count == 0)
+                return $"{what} — {scan.Entities} live entities but no ability-upgrade entities at all; "
+                    + "the ability tree is not loaded yet.";
+            return $"{what} — not among the {scan.Upgrades.Count} upgrade instance(s) spawned in this save "
+                + $"({scan.Entities} live entities scanned).";
         }
 
         /// <summary>ReadProcessMemory of 8 bytes that reports which labelled read faulted, and where.</summary>
@@ -222,10 +276,12 @@ namespace Ap.Control.Memory
         {
             if (!EnsureStarted()) return GrantResult.Fail(NotStartedReason);
 
+            UpgradeScan scan;
             List<ulong> instances;
             try
             {
-                instances = ScanAbilityUpgradeInstances(verbose: false)
+                scan = ScanCached(verbose);
+                instances = scan.Upgrades
                     .Where(u => u.DefinitionGid == definitionGid)
                     .Select(u => u.InstanceGid)
                     .Distinct()
@@ -234,8 +290,7 @@ namespace Ap.Control.Memory
             catch (Exception e) { return GrantResult.Fail($"instance scan failed: {e.Message}"); }
 
             if (instances.Count == 0)
-                return GrantResult.Fail(
-                    $"no live instance for definition 0x{definitionGid:X} — not currently spawned in the entity table");
+                return GrantResult.Fail(DescribeMiss(definitionGid, scan));
 
             if (verbose) Console.WriteLine($"  {instances.Count} instance(s) for 0x{definitionGid:X}: "
                 + string.Join(", ", instances.Select(i => $"0x{i:X}")));

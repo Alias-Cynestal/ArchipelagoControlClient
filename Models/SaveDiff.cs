@@ -29,7 +29,7 @@ namespace Ap.Control.Models
         public IReadOnlyList<ItemQuantityChange> QuantityChanges { get; init; } = Array.Empty<ItemQuantityChange>();
         public IReadOnlyList<ulong> NewSectorsVisited { get; init; } = Array.Empty<ulong>();
         public IReadOnlyList<ulong> NewFoundLocations { get; init; } = Array.Empty<ulong>();
-        public IReadOnlyList<ulong> NewFoundNarrativeObjects { get; init; } = Array.Empty<ulong>();
+        public IReadOnlyList<ulong> NewCollectibles { get; init; } = Array.Empty<ulong>();
         public IReadOnlyList<ulong> NewUnlockedControlPoints { get; init; } = Array.Empty<ulong>();
         public ScalarChange<uint>? Level { get; init; }
         public ScalarChange<uint>? AbilityPoints { get; init; }
@@ -40,7 +40,7 @@ namespace Ap.Control.Models
         public bool HasChanges =>
             AddedItems.Count > 0 || RemovedItems.Count > 0 || QuantityChanges.Count > 0 ||
             NewSectorsVisited.Count > 0 || NewFoundLocations.Count > 0 ||
-            NewFoundNarrativeObjects.Count > 0 || NewUnlockedControlPoints.Count > 0 ||
+            NewCollectibles.Count > 0 || NewUnlockedControlPoints.Count > 0 ||
             Level is not null || AbilityPoints is not null || AbilityPointsSpent is not null ||
             MissionChanges.Count > 0 || NewCompletedTrials.Count > 0 || NewOutfits.Count > 0;
     }

@@ -9,8 +9,7 @@
       "commandLineArgs": "--grant-milestone 2"
     },
     "Start Client": {
-      "commandName": "Project",
-      "commandLineArgs": "--server ws://localhost:38281 --username Jesse"
+      "commandName": "Project"
     }
   }
 }

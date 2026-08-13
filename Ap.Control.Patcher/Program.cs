@@ -49,7 +49,8 @@ namespace Ap.Control.Patcher
                     : Patches.ById(selector) is { } one
                         ? [one]
                         : throw new PatchException(
-                            $"unknown patch '{selector}'. Known: {string.Join(", ", Patches.All.Select(p => p.Id))}, all");
+                            $"unknown patch '{selector}'. Known: "
+                            + $"{string.Join(", ", Patches.All.Concat(Patches.Diagnostics).Select(p => p.Id))}, all");
 
             string game = GameLocator.Resolve(gameOpt);
             Console.WriteLine($"game      : {game}");
@@ -57,7 +58,7 @@ namespace Ap.Control.Patcher
             return command.ToLowerInvariant() switch
             {
                 "status" => ForEach(selected, p => Status(p, game, store)),
-                "apply" => ForEach(selected, p => Apply(p, game, store, dryRun)),
+                "apply" => ForEach(selected, p => Apply(p, game, store, dryRun, cli.Get("--out"))),
                 "verify" => ForEach(selected, p => Verify(p, game)),
                 "restore" => ForEach(selected, p => Restore(p, game, store)),
                 _ => Usage(),
@@ -127,7 +128,7 @@ namespace Ap.Control.Patcher
             _ => "UNKNOWN (neither stock nor patched anchors present — game updated?)",
         };
 
-        private static int Apply(PatchDef patch, string game, BackupStore store, bool dryRun)
+        private static int Apply(PatchDef patch, string game, BackupStore store, bool dryRun, string? cliOut)
         {
             var (entry, rmdp, blob) = Load(patch, game);
 
@@ -144,7 +145,14 @@ namespace Ap.Control.Patcher
 
             if (dryRun)
             {
-                Console.WriteLine("--dry-run: nothing written.");
+                // Writing the result out lets the JS be syntax-checked before anything touches the
+                // game archive — cheaper than applying, launching, and finding a blank screen.
+                if (cliOut is { } outPath)
+                {
+                    File.WriteAllBytes(outPath, patched);
+                    Console.WriteLine($"--dry-run: patched content written to {outPath}");
+                }
+                Console.WriteLine("--dry-run: game files untouched.");
                 return 0;
             }
 
@@ -212,7 +220,7 @@ namespace Ap.Control.Patcher
         /// </summary>
         private sealed record CommandLine(List<string> Positionals, Dictionary<string, string?> Options)
         {
-            private static readonly string[] TakesValue = ["--game", "--backup-dir"];
+            private static readonly string[] TakesValue = ["--game", "--backup-dir", "--out"];
 
             internal static CommandLine Parse(string[] args)
             {
@@ -260,12 +268,14 @@ namespace Ap.Control.Patcher
                   elevator  Gate each elevator sector destination independently
                   shop      Remove weapon-form unlocks from the control-point shop
                   abilities Lock every not-yet-owned node in the Abilities menu
-                  all       Every patch (default)
+                  bootstrap Let the client serve the in-game Archipelago UI over 127.0.0.1
+                  all       Every gameplay patch (default)
 
                 OPTIONS
                   --game <path>        Control install folder (auto-detected if omitted)
                   --backup-dir <path>  Where originals are kept (default: LocalAppData\\Ap.Control)
-                  --dry-run            Show what apply would do, write nothing
+                  --dry-run            Show what apply would do, leave the game untouched
+                  --out <path>         With --dry-run, save the patched content for inspection
 
                 EXAMPLES
                   Ap.Control.Patcher status
