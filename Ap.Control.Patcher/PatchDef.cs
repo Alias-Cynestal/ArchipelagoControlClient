@@ -39,15 +39,8 @@ namespace Ap.Control.Patcher
                 throw new PatchException(
                     $"patched content is {-needed} bytes LONGER than the original, but this patch can " +
                     "only pad; it has no donor to take bytes from");
-            if (needed < 4)
-                throw new PatchException($"cannot pad {needed} byte(s) with a block comment (needs >= 4)");
 
-            // "/*" + filler + "*/" — filler repeats a recognisable word so the padding is identifiable
-            // in a hex dump rather than looking like corruption.
-            var sb = new StringBuilder("/*");
-            while (sb.Length < needed - 2) sb.Append(PadWord);
-            byte[] pad = Encoding.ASCII.GetBytes(sb.ToString()[..(needed - 2)] + "*/");
-            if (pad.Length != needed) throw new PatchException("pad construction failed");
+            byte[] pad = Comment.Of(needed, PadWord);
 
             int at = Bytes.IndexOf(patched, Anchor);
             if (at < 0) throw new PatchException("pad anchor not found in patched content");
@@ -89,6 +82,113 @@ namespace Ap.Control.Patcher
                 throw new PatchException("donor literal is not present exactly once");
 
             return Bytes.Replace(patched, original, Shrunk(take));
+        }
+    }
+
+    /// <summary>
+    /// A block comment of an exact byte length — inert wherever a JS expression list, array body or
+    /// statement can appear, so it is the universal filler for making an edit length-neutral.
+    /// </summary>
+    internal static class Comment
+    {
+        internal const int Minimum = 4;   // "/**/"
+
+        internal static byte[] Of(int length, string word)
+        {
+            if (length < Minimum)
+                throw new PatchException($"cannot build a {length}-byte block comment (needs >= {Minimum})");
+
+            // The filler repeats a recognisable word so padding is identifiable in a hex dump rather
+            // than looking like corruption.
+            var sb = new StringBuilder("/*");
+            while (sb.Length < length - 2) sb.Append(word);
+            byte[] bytes = Encoding.ASCII.GetBytes(sb.ToString()[..(length - 2)] + "*/");
+            if (bytes.Length != length) throw new PatchException("comment construction failed");
+            return bytes;
+        }
+    }
+
+    /// <summary>
+    /// Takes space by emptying a dead bracketed region — a mock-data array that the shipped game never
+    /// evaluates — and leaving a block comment in its place, so <c>[{...},{...}]</c> becomes
+    /// <c>[/*pad*/]</c>. Where <see cref="DonorBalancer"/> can only shave one string literal, this frees
+    /// the whole region, which is what a patch that injects real code needs.
+    ///
+    /// <paramref name="Marker"/> must be unique in the file and END with the region's opening bracket.
+    /// </summary>
+    internal sealed record CollapseBalancer(byte[] Marker, string PadWord) : Balancer
+    {
+        internal override byte[] Balance(byte[] patched, int needed)
+        {
+            if (needed == 0) return patched;
+            if (needed > 0)
+                throw new PatchException(
+                    $"patched content is {needed} bytes SHORTER than the original, but this patch only " +
+                    "knows how to free space, not take it up");
+
+            if (Bytes.Count(patched, Marker) != 1)
+                throw new PatchException("collapse marker is not present exactly once");
+
+            int open = Bytes.IndexOf(patched, Marker) + Marker.Length - 1;
+            int close = MatchBracket(patched, open);
+            int interior = close - open - 1;
+
+            int take = -needed;
+            int capacity = interior - Comment.Minimum;
+            if (take > capacity)
+                throw new PatchException(
+                    $"deficit of {take} bytes exceeds the dead region's {capacity}-byte capacity");
+
+            byte[] comment = Comment.Of(interior - take, PadWord);
+
+            var outBuf = new byte[patched.Length - take];
+            patched.AsSpan(0, open + 1).CopyTo(outBuf);
+            comment.CopyTo(outBuf, open + 1);
+            patched.AsSpan(close).CopyTo(outBuf.AsSpan(open + 1 + comment.Length));
+            return outBuf;
+        }
+
+        /// <summary>
+        /// Index of the bracket closing the one at <paramref name="open"/>. String-aware, because the
+        /// mock data is full of bracket characters inside quoted text. Regex literals would also need
+        /// handling, but a region only qualifies as a donor if it is pure data, which has none.
+        /// </summary>
+        private static int MatchBracket(byte[] data, int open)
+        {
+            byte opener = data[open];
+            byte closer = opener switch
+            {
+                (byte)'[' => (byte)']',
+                (byte)'{' => (byte)'}',
+                (byte)'(' => (byte)')',
+                _ => throw new PatchException($"collapse marker does not end with a bracket (got '{(char)opener}')"),
+            };
+
+            int depth = 0;
+            byte quote = 0;
+            for (int i = open; i < data.Length; i++)
+            {
+                byte c = data[i];
+                if (quote != 0)
+                {
+                    if (c == (byte)'\\') i++;
+                    else if (c == quote) quote = 0;
+                    continue;
+                }
+                switch (c)
+                {
+                    case (byte)'"' or (byte)'\'' or (byte)'`':
+                        quote = c;
+                        break;
+                    case var _ when c == opener:
+                        depth++;
+                        break;
+                    case var _ when c == closer:
+                        if (--depth == 0) return i;
+                        break;
+                }
+            }
+            throw new PatchException("unbalanced brackets: could not find the end of the dead region");
         }
     }
 

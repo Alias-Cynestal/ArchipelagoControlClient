@@ -30,7 +30,7 @@ namespace Ap.Control.Utils.Save
 
                 NewSectorsVisited = NewGids(prevPp?.SectorsVisited.Gid, curPp?.SectorsVisited.Gid),
                 NewFoundLocations = NewGids(prevPp?.FoundLocations.Gid, curPp?.FoundLocations.Gid),
-                NewFoundNarrativeObjects = NewGids(prevPp?.FoundNarrativeObjects.Gid, curPp?.FoundNarrativeObjects.Gid),
+                NewCollectibles = NewGids(prevPp?.FoundNarrativeObjects.Gid, curPp?.FoundNarrativeObjects.Gid),
                 NewUnlockedControlPoints = NewGids(
                     prevPp?.UnlockedControlPoints.Select(cp => cp.Gid),
                     curPp?.UnlockedControlPoints.Select(cp => cp.Gid)),

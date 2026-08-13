@@ -24,24 +24,19 @@ namespace Ap.Control
         private const int InitialSyncGraceMs = 3000;
         private const int ItemQuietMs = 1500;
 
-        /// <summary>
-        /// How often to re-write the elevator UI bits.
-        /// </summary>
-        private const int UiBitIntervalMs = 100;
         private const int MaxMilestoneLevel = 3;
 
         private ArchipelagoSession _session;
         private readonly IItemGranter _granter;
         private readonly IAbilityGranter _abilityGranter;
         private readonly IGameFlowController _gameflow;
-        private readonly IUiModelController _uiModel;
         private readonly ApItemMap _itemMap;
         private readonly ArchipelagoConnectionModel _model;
 
         // Archipelago-granted state, the source of truth reconciliation enforces against the live game.
         private readonly object _grantLock = new();
         private readonly HashSet<string> _grantedFlags = new();
-        // Which elevator UI bits AP has granted. 
+        // Which elevator sectors AP has granted, as reported to the in-game page.
         private readonly HashSet<ElevatorBit> _grantedBits = new();
         private int _grantedClearance;
         // How many Progressive Clearance Level items have arrived.
@@ -53,7 +48,6 @@ namespace Ap.Control
         // Serialises reconcile passes — the save-watch thread and the timer both drive GameFlow writes.
         private readonly object _reconcileLock = new();
         private Timer? _reconcileTimer;
-        private Timer? _uiBitTimer;
         // Set in Dispose so an in-flight pass does not re-arm a timer that is going away.
         private volatile bool _disposed;
         // Initial-sync gate: enforcement stays off until the replayed item batch has settled.
@@ -66,29 +60,70 @@ namespace Ap.Control
         // Which inventory grants have physically happened.
         private InventoryGrantLog? _grantLog;
 
+        // One-shot grants the game could not take yet — almost always because the player is still in
+        // the main menu when the server replays the item list. Retried in order on the reconcile tick.
+        private readonly List<DeferredGrant> _deferredGrants = new();
+        private bool _deferralAnnounced;
+
         public ArchipelagoClient(ArchipelagoConnectionModel model, IItemGranter granter, IAbilityGranter abilityGranter,
-            IGameFlowController gameflow, IUiModelController uiModel, ApItemMap itemMap)
+            IGameFlowController gameflow, ApItemMap itemMap)
         {
             _session = createSession(model);
             _granter = granter;
             _abilityGranter = abilityGranter;
             _gameflow = gameflow;
-            _uiModel = uiModel;
             _itemMap = itemMap;
             _model = model;
         }
 
-        public Task StartClient() 
+        /// <summary>
+        /// Whether the session is live. Read by the UI bridge, which can be asked for status at any
+        /// time — including before a connection has ever been made.
+        /// </summary>
+        public bool IsConnected => _session.Socket.Connected;
+
+        public string SlotName => _model.Username;
+
+        public string Seed
+        {
+            get
+            {
+                try { return _session.RoomState.Seed ?? "-"; }
+                catch { return "-"; }
+            }
+        }
+
+        public int LocationsChecked
+        {
+            get
+            {
+                try { return _session.Locations.AllLocationsChecked.Count; }
+                catch { return 0; }
+            }
+        }
+
+        public int LocationsTotal
+        {
+            get
+            {
+                try { return _session.Locations.AllLocations.Count; }
+                catch { return 0; }
+            }
+        }
+
+        public Task StartClient()
         {
             LoginResult result = _session.TryConnectAndLogin(GameName, _model.Username, ItemsHandlingFlags.IncludeOwnItems, password: _model.Password);
             if(!result.Successful)
             {
-                return Task.FromException(new Exception("Failed to connect to Archipelago server."));
+                string reason = result is LoginFailure failure && failure.Errors.Length > 0
+                    ? string.Join("; ", failure.Errors)
+                    : "Failed to connect to Archipelago server.";
+                return Task.FromException(new Exception(reason));
             }
 
             _connectedUtc = DateTime.UtcNow;
             _reconcileTimer = new Timer(OnReconcileTick, null, ReconcileIntervalMs, Timeout.Infinite);
-            _uiBitTimer = new Timer(OnUiBitTick, null, UiBitIntervalMs, Timeout.Infinite);
             return Task.CompletedTask;
         }
 
@@ -110,6 +145,12 @@ namespace Ap.Control
             {
                 Console.WriteLine($"Completing control point check for location {_session.Locations.GetLocationNameFromId((long)controlPoint)}");
                 _session.Locations.CompleteLocationChecks((long)controlPoint);
+            }
+
+            foreach (var collectible in change.Diff.NewCollectibles)
+            {
+                Console.WriteLine($"Completing collectible check for location {_session.Locations.GetLocationNameFromId((long)collectible)}");
+                _session.Locations.CompleteLocationChecks((long)collectible);
             }
 
             foreach (var mission in change.Diff.MissionChanges)
@@ -199,6 +240,8 @@ namespace Ap.Control
         {
             try
             {
+                FlushDeferredGrants();
+
                 if (!ReadyToEnforce()) return;
                 ReconcileLocks();
             }
@@ -209,28 +252,6 @@ namespace Ap.Control
             finally
             {
                 Rearm(_reconcileTimer, ReconcileIntervalMs);
-            }
-        }
-
-        /// <summary>
-        /// Re-write the elevator UI bits to set which sectors are available to the player.
-        /// </summary>
-        private void OnUiBitTick(object? _)
-        {
-            try
-            {
-                if (!ReadyToEnforce()) return;
-                ElevatorBit[] bits;
-                lock (_grantLock) bits = _grantedBits.ToArray();
-                _uiModel.SetBits(bits.ToHashSet());
-            }
-            catch
-            {
-                // Deliberately swallowed — this runs 10x/second and must never spam or die.
-            }
-            finally
-            {
-                Rearm(_uiBitTimer, UiBitIntervalMs);
             }
         }
 
@@ -248,7 +269,6 @@ namespace Ap.Control
         {
             _disposed = true;
             _reconcileTimer?.Dispose();
-            _uiBitTimer?.Dispose();
         }
 
         private ArchipelagoSession createSession(ArchipelagoConnectionModel model)
@@ -329,6 +349,10 @@ namespace Ap.Control
                             if (action.Bits is not null)
                                 foreach (var bit in action.Bits) _grantedBits.Add(bit);
                         }
+                        // Elevator access is part of what the page shows now, so a granted sector
+                        // should reach it without waiting for the next status request.
+                        NotifyStateChanged();
+
                         foreach (var flag in action.Flags!)
                         {
                             int flagNodes = _gameflow.SetFlag(flag, true);
@@ -375,43 +399,143 @@ namespace Ap.Control
         /// Spawn one inventory item into the game, unless the grant log says this ordinal was already granted on an earlier connect.
         /// </summary>
         private void GrantInventory(ulong gid, int ordinal, string notAcceptedHint)
+            => GrantOnce(ordinal, $"inventory: GID 0x{gid:X}",
+                () => _granter.GiveItemAsync(gid).Result, notAcceptedHint);
+
+        private void GrantOnce(int ordinal, string itemName, Func<GrantResult> attempt, string notAcceptedHint = "")
         {
             var log = GrantLog();
             if (log.IsGranted(ordinal))
             {
-                Console.WriteLine($"  -> inventory: GID 0x{gid:X} already granted on an earlier connect — skipped");
+                Console.WriteLine($"  -> {itemName} already granted on an earlier connect — skipped");
                 return;
             }
 
-            GrantResult gr = _granter.GiveItemAsync(gid).Result;
-            if (gr.Ok)
-                log.MarkGranted(ordinal);
+            bool queued = false;
+            lock (_grantLock)
+            {
+                if (_deferredGrants.Count > 0)
+                {
+                    _deferredGrants.Add(new DeferredGrant(ordinal, itemName, attempt, notAcceptedHint));
+                    Console.WriteLine($"  -> {itemName} queued behind {_deferredGrants.Count - 1} earlier item(s)");
+                    queued = true;
+                }
+            }
 
-            Console.WriteLine($"  -> inventory: GID 0x{gid:X} -> {gr}"
-                + (gr.Ok && !gr.Accepted ? notAcceptedHint : "")
-                + (gr.Ok ? "" : " (not recorded — will retry on next connect)"));
+            if (queued)
+            {
+                NotifyStateChanged();
+                return;
+            }
+
+            GrantResult gr = attempt();
+            if (gr.Ok)
+            {
+                log.MarkGranted(ordinal);
+                Console.WriteLine($"  -> {itemName} -> {gr}" + (gr.Accepted ? "" : notAcceptedHint));
+                return;
+            }
+
+            lock (_grantLock) _deferredGrants.Add(new DeferredGrant(ordinal, itemName, attempt, notAcceptedHint));
+            Console.WriteLine($"  -> {itemName} -> {gr}; held until the game can take it "
+                + "(load a save — it will be granted then)");
+            NotifyStateChanged();
         }
 
-        /// <summary>
-        /// Grant one ability-tree upgrade (or menu-purchasable base ability unlock), unless the grant
-        /// log says this ordinal was already granted on an earlier connect.
-        /// </summary>
+        private void FlushDeferredGrants()
+        {
+            DeferredGrant[] batch;
+            lock (_grantLock)
+            {
+                if (_deferredGrants.Count == 0)
+                {
+                    _deferralAnnounced = false;
+                    return;
+                }
+                batch = _deferredGrants.ToArray();
+            }
+
+            var stillWaiting = new List<DeferredGrant>();
+            DeferredGrant? firstFailed = null;
+            GrantResult? firstFailure = null;
+            bool anyGranted = false;
+
+            foreach (DeferredGrant item in batch)
+            {
+                GrantResult gr = item.Attempt();
+                if (!gr.Ok)
+                {
+                    stillWaiting.Add(item);
+                    firstFailed ??= item;
+                    firstFailure ??= gr;
+                    continue;
+                }
+
+                GrantLog().MarkGranted(item.Ordinal);
+                anyGranted = true;
+                Console.WriteLine($"  -> {item.What} -> {gr} (held item, now granted)"
+                    + (gr.Accepted ? "" : item.NotAcceptedHint));
+            }
+
+            int waiting;
+            bool announce;
+            lock (_grantLock)
+            {
+                _deferredGrants.RemoveRange(0, batch.Length);
+                _deferredGrants.InsertRange(0, stillWaiting);
+                waiting = _deferredGrants.Count;
+
+                if (anyGranted) _deferralAnnounced = false;
+                announce = waiting > 0 && !_deferralAnnounced;
+                if (announce) _deferralAnnounced = true;
+                if (waiting == 0) _deferralAnnounced = false;
+            }
+
+            if (announce && firstFailed is not null)
+                Console.WriteLine($"[items] {waiting} item(s) waiting for the game "
+                    + $"(first: {firstFailed.What} — {firstFailure})");
+
+            if (anyGranted) NotifyStateChanged();
+        }
+
+        public IReadOnlyDictionary<int, bool> ElevatorSectors
+        {
+            get
+            {
+                ElevatorBit[] granted;
+                lock (_grantLock) granted = _grantedBits.ToArray();
+
+                var map = new Dictionary<int, bool>
+                {
+                    [0] = true,
+                    [1] = granted.Contains(ElevatorBit.Research),
+                    [2] = granted.Contains(ElevatorBit.MaintenanceLobby),
+                    [3] = granted.Contains(ElevatorBit.MaintenancePumpRoom),
+                    [4] = granted.Contains(ElevatorBit.Containment),
+                    [5] = granted.Contains(ElevatorBit.Investigation),
+                };
+                return map;
+            }
+        }
+
+        public int PendingGrants
+        {
+            get { lock (_grantLock) return _deferredGrants.Count; }
+        }
+
+        public event Action? StateChanged;
+
+        private void NotifyStateChanged()
+        {
+            try { StateChanged?.Invoke(); }
+            catch (Exception e) { Console.Error.WriteLine($"[state] {e.Message}"); }
+        }
+
+        private sealed record DeferredGrant(int Ordinal, string What, Func<GrantResult> Attempt, string NotAcceptedHint);
+
         private void GrantAbility(ulong definitionGid, int ordinal)
-        {
-            var log = GrantLog();
-            if (log.IsGranted(ordinal))
-            {
-                Console.WriteLine($"  -> ability: GID 0x{definitionGid:X} already granted on an earlier connect — skipped");
-                return;
-            }
-
-            GrantResult gr = _abilityGranter.GrantAbilityAsync(definitionGid).Result;
-            if (gr.Ok)
-                log.MarkGranted(ordinal);
-
-            Console.WriteLine($"  -> ability: GID 0x{definitionGid:X} -> {gr}"
-                + (gr.Ok ? "" : " (not recorded — will retry on next connect)"));
-        }
+            => GrantOnce(ordinal, $"ability: GID 0x{definitionGid:X}",
+                () => _abilityGranter.GrantAbilityAsync(definitionGid).Result);
 
 
         /// <summary>
@@ -426,19 +550,8 @@ namespace Ap.Control
                 level = _progressiveMilestone;
             }
 
-            var log = GrantLog();
-            if (log.IsGranted(ordinal))
-            {
-                Console.WriteLine($"  -> milestone: progressive #{level} already granted on an earlier connect — skipped");
-                return;
-            }
-
-            GrantResult gr = _abilityGranter.GrantMilestoneAsync(level).Result;
-            if (gr.Ok)
-                log.MarkGranted(ordinal);
-
-            Console.WriteLine($"  -> milestone: progressive #{level} (weapon/mod slots up to level {level}) -> {gr}"
-                + (gr.Ok ? "" : " (not recorded — will retry on next connect)"));
+            GrantOnce(ordinal, $"milestone: progressive #{level} (weapon/mod slots up to level {level})",
+                () => _abilityGranter.GrantMilestoneAsync(level).Result);
         }
     }
 }

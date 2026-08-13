@@ -59,6 +59,8 @@
     <!-- LogicalName pins the resource name so the lookup in Program.cs cannot break on a namespace
          change. -->
     <EmbeddedResource Include="apitems.json" LogicalName="apitems.json" />
+
+    <EmbeddedResource Include="ui\*.js" LogicalName="ui/%(Filename)%(Extension)" />
   </ItemGroup>
 
   <ItemGroup>
