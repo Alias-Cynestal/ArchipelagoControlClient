@@ -12,13 +12,23 @@ namespace Ap.Control.Ui
             string text = Host.Trim();
             if (text.Length == 0) throw new ArgumentException("no server address given");
 
-            if (!text.Contains("://", StringComparison.Ordinal)) text = "ws://" + text;
+            int sep = text.IndexOf("://", StringComparison.Ordinal);
+            string rest = sep < 0 ? text : text[(sep + 3)..];
+            string scheme = sep < 0
+                ? "unspecified"
+                : text[..sep].ToLowerInvariant() switch
+                {
+                    "ws" => "ws",
+                    "wss" => "wss",
+                    var other => throw new ArgumentException(
+                        $"'{other}://' is not a websocket address — use ws:// or wss://, or leave empty to try both")
+                };
 
-            string authority = text[(text.IndexOf("://", StringComparison.Ordinal) + 3)..];
+            string authority = rest;
             int slash = authority.IndexOf('/');
             if (slash >= 0) authority = authority[..slash];
 
-            var builder = new UriBuilder(text);
+            var builder = new UriBuilder(scheme + "://" + rest);
             if (!authority.Contains(':'))
             {
                 string port = Port.Trim();
