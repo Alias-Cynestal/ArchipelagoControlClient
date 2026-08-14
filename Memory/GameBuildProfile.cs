@@ -170,8 +170,30 @@ namespace Ap.Control.Memory
             CoregamePump           = 0x007E0E0,
         };
 
+        /// <summary>
+        /// GOG. Verified against Control_DX12.exe FileVersion 0.0.518.2177.
+        /// </summary>
+        public static readonly GameBuildProfile Gog = new()
+        {
+            Name = "GOG 0.0.518.2177",
+            Sha256 = "57A8912F1FD839E99162AED2536914DEE01FF298938132354DA579ADC690E91E",
+
+            InventoryVtable        = 0x0E28A18,
+            GiveItemFromDefinition = 0x03B6C30,
+            UiHudVtable            = 0x0E5E5E8,
+            AbilityMgrSlot         = 0x1239360,
+            FireApplyPin           = 0x0211490,
+            FirePin                = 0x006A030,
+            FlowConnMgrHolder      = 0x0DA1058,
+            SaveGameThunk          = 0x0D9C438,
+            GomContainer           = 0x0DA10B0,
+            MilestoneThresholds    = new long[] { 0x12B00A0, 0x12AFFE0, 0x12AFF20 },
+
+            CoregamePump           = 0x007E0A0,
+        };
+
         /// <summary>Every profile the client ships, mapped or not.</summary>
-        public static IReadOnlyList<GameBuildProfile> All { get; } = new[] { Steam, Epic };
+        public static IReadOnlyList<GameBuildProfile> All { get; } = new[] { Steam, Epic, Gog };
 
         // ==========================================================================================
 
